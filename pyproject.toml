@@ -1,9 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "xopr-gline"
 version = "0.1.0"
-description = "Add your description here"
+description = "Automated grounding point detection using xOPR"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "xopr>=0.3.0",
 ]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/xopr_gline"]
