@@ -11,3 +11,7 @@ wheels/
 
 .ipynb_checkpoints
 */.ipynb_checkpoints/*
+
+# Spyder project files and directories
+.spyproject/
+*.spyproject
