@@ -14,3 +14,6 @@ dependencies = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/xopr_gline"]
+
+[tool.uv.sources]
+xopr = { git = "https://github.com/englacial/xopr.git" }
