@@ -9,7 +9,7 @@ description = "Automated grounding point detection using xOPR"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "earthaccess>=0.15.1",
+    "earthaccess>=0.16.0",
     "xopr>=0.3.0",
 ]
 

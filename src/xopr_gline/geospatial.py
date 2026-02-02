@@ -26,6 +26,9 @@ def get_greenland_termini() -> gpd.GeoDataFrame:
         |     1     |     | LINESTRING(...) |     | ? Gletsjer |     |
 
     """
+    # Authenticate to Earthdata login
+    earthaccess.login()
+
     # Search for granules in https://nsidc.org/data/nsidc-0642/versions/2
     granules = earthaccess.search_data(
         collection_concept_id="C3292900075-NSIDC_CPRD",
