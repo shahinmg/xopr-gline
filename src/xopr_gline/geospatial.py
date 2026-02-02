@@ -3,6 +3,8 @@ Functions for retrieving geospatial datasets and making spatiotemporal queries.
 """
 
 import datetime
+import os
+import tempfile
 
 import earthaccess
 import geopandas as gpd
@@ -44,15 +46,16 @@ def get_greenland_termini(end_year: int = 2021) -> gpd.GeoDataFrame:
         collection_concept_id="C3292900075-NSIDC_CPRD",
         temporal=(start_date, end_date),
     )
-    _files = earthaccess.download(granules=granules, local_path="data/")
+    _files = earthaccess.download(granules=granules, local_path=tempfile.tempdir)
 
     # Join glacier placenames to their termini geometry
     df_glacierid = gpd.read_file(
-        filename="data/GlacierIDs_v02.0.shp", read_geometry=False
+        filename=os.path.join(tempfile.tempdir, "GlacierIDs_v02.0.shp"),
+        read_geometry=False,
     ).set_index(keys="GlacierID")
-    gdf_termini_ = gpd.read_file(filename="data/termini_2020_2021_v02.0.shp").set_index(
-        keys="Glacier_ID"
-    )
+    gdf_termini_ = gpd.read_file(
+        filename=os.path.join(tempfile.tempdir, "termini_2020_2021_v02.0.shp")
+    ).set_index(keys="Glacier_ID")
     gdf_termini = gdf_termini_.merge(
         right=df_glacierid,
         left_index=True,  # left_on="Glacier_ID"
