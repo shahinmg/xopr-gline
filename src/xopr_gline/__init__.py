@@ -3,7 +3,7 @@ try:
 except ImportError:
     __version__ = "unknown"
 
+from .geospatial import get_greenland_termini as get_greenland_termini
 from .xopr_utils import extract_layer_peak_power as extract_layer_peak_power
-from .xopr_utils import surface_bed_reflection_power as surface_bed_reflection_power
 from .xopr_utils import get_basal_layer_wgs84 as get_basal_layer_wgs84
-
+from .xopr_utils import surface_bed_reflection_power as surface_bed_reflection_power

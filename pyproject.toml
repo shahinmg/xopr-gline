@@ -18,3 +18,8 @@ packages = ["src/xopr_gline"]
 
 [tool.uv.sources]
 xopr = { git = "https://github.com/englacial/xopr.git" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
