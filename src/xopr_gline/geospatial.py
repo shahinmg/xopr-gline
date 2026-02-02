@@ -2,11 +2,13 @@
 Functions for retrieving geospatial datasets and making spatiotemporal queries.
 """
 
+import datetime
+
 import earthaccess
 import geopandas as gpd
 
 
-def get_greenland_termini() -> gpd.GeoDataFrame:
+def get_greenland_termini(end_year: int = 2021) -> gpd.GeoDataFrame:
     """
     Load Greenland outlet glacier termini positions.
 
@@ -15,6 +17,12 @@ def get_greenland_termini() -> gpd.GeoDataFrame:
       Outlet Glacier Terminus Positions from SAR Mosaics. (NSIDC-0642, Version 2).
       [Data Set]. Boulder, Colorado USA. NASA National Snow and Ice Data Center
       Distributed Active Archive Center. https://doi.org/10.5067/ESFWE11AVFKW.
+
+    Parameters
+    ----------
+    end_year : int
+        Year to select for the glacier termini position. Function will pull in data
+        from end_year - 1 to end_year. Default is 2021, i.e. 2020-2021.
 
     Returns
     -------
@@ -30,9 +38,11 @@ def get_greenland_termini() -> gpd.GeoDataFrame:
     earthaccess.login()
 
     # Search for granules in https://nsidc.org/data/nsidc-0642/versions/2
+    end_date = datetime.datetime(year=end_year, month=12, day=31)
+    start_date = datetime.datetime(year=end_year, month=1, day=1)
     granules = earthaccess.search_data(
         collection_concept_id="C3292900075-NSIDC_CPRD",
-        temporal=("2021-01-01", "2021-12-31"),  # TODO make this a parameter?
+        temporal=(start_date, end_date),
     )
     _files = earthaccess.download(granules=granules, local_path="data/")
 
