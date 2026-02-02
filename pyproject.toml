@@ -9,6 +9,7 @@ description = "Automated grounding point detection using xOPR"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "earthaccess>=0.16.0",
     "xopr>=0.3.0",
 ]
 
@@ -17,3 +18,8 @@ packages = ["src/xopr_gline"]
 
 [tool.uv.sources]
 xopr = { git = "https://github.com/englacial/xopr.git" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
