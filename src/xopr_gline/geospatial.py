@@ -61,6 +61,6 @@ def get_greenland_termini(end_year: int = 2021) -> gpd.GeoDataFrame:
         right=df_glacierid,
         left_index=True,  # left_on="Glacier_ID"
         right_index=True,  # right_on="GlacierID"
-    )
+    ).sort_index(axis="index")
 
     return gdf_termini.to_crs(crs="OGC:CRS84")
