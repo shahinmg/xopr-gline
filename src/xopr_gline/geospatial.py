@@ -30,6 +30,7 @@ def get_greenland_termini(end_year: int = 2021) -> gpd.GeoDataFrame:
     -------
     gpd.GeoDataFrame
         A geopandas.GeoDataFrame of the glacier termini positions for one year.
+        Linestring coordinates are in OGC:CRS84, i.e. longitude/latitude.
 
         | GlacierID | ... |    geometry     | ... | Official_n | ... |
         |-----------|-----|-----------------|-----|------------|-----|
@@ -62,4 +63,4 @@ def get_greenland_termini(end_year: int = 2021) -> gpd.GeoDataFrame:
         right_index=True,  # right_on="GlacierID"
     )
 
-    return gdf_termini
+    return gdf_termini.to_crs(crs="OGC:CRS84")

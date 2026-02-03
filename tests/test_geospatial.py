@@ -28,3 +28,4 @@ def test_get_greenland_termini():
         "AltName",
     }
     assert gdf.geometry.geom_type.unique().tolist() == ["LineString"]
+    assert gdf.geometry.crs == "OGC:CRS84"
