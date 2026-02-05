@@ -9,6 +9,8 @@ Results are saved to a GeoJSON file with the following table structure:
 | Data_20020531_06_001 |     1     | 2002_Greenland_P3 | LINESTRING(...) |
 """
 
+import time
+
 import geopandas as gpd
 import tqdm
 import xopr
@@ -29,14 +31,15 @@ gdf_termini: gpd.GeoDataFrame = xopr_gline.geospatial.get_greenland_termini(
 assert len(gdf_termini) == 239
 
 # %%
-# Loop through glaciers termini, save out stac_item_id
+# Loop through glacier termini, save out stac_item_id
 for row in tqdm.tqdm(iterable=gdf_termini.itertuples(), total=len(gdf_termini)):
-    if row.Index > 10:
-        break
     print("\n")
     print(f"Looking at GlacierID {row.Index}:", row.Official_n)
     # Search for radar frames intersecting termini linestring geometry
+    tic = time.time()
     stac_items: gpd.GeoDataFrame = opr.query_frames(geometry=row.geometry)
+    toc = time.time()
+    print(f"Took {toc - tic} seconds")
     if stac_items is not None:
         print(f"Found {len(stac_items)} rows")
 
