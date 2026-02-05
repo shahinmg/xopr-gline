@@ -30,6 +30,7 @@ def get_greenland_termini(end_year: int = 2021) -> gpd.GeoDataFrame:
     -------
     gpd.GeoDataFrame
         A geopandas.GeoDataFrame of the glacier termini positions for one year.
+        Linestring coordinates are in OGC:CRS84, i.e. longitude/latitude.
 
         | GlacierID | ... |    geometry     | ... | Official_n | ... |
         |-----------|-----|-----------------|-----|------------|-----|
@@ -46,20 +47,21 @@ def get_greenland_termini(end_year: int = 2021) -> gpd.GeoDataFrame:
         collection_concept_id="C3292900075-NSIDC_CPRD",
         temporal=(start_date, end_date),
     )
-    _files = earthaccess.download(granules=granules, local_path=tempfile.tempdir)
+    with tempfile.TemporaryDirectory() as tmpdirname:
+        _files = earthaccess.download(granules=granules, local_path=tmpdirname)
 
-    # Join glacier placenames to their termini geometry
-    df_glacierid = gpd.read_file(
-        filename=os.path.join(tempfile.tempdir, "GlacierIDs_v02.0.shp"),
-        read_geometry=False,
-    ).set_index(keys="GlacierID")
-    gdf_termini_ = gpd.read_file(
-        filename=os.path.join(tempfile.tempdir, "termini_2020_2021_v02.0.shp")
-    ).set_index(keys="Glacier_ID")
-    gdf_termini = gdf_termini_.merge(
-        right=df_glacierid,
-        left_index=True,  # left_on="Glacier_ID"
-        right_index=True,  # right_on="GlacierID"
-    )
+        # Join glacier placenames to their termini geometry
+        df_glacierid = gpd.read_file(
+            filename=os.path.join(tmpdirname, "GlacierIDs_v02.0.shp"),
+            read_geometry=False,
+        ).set_index(keys="GlacierID")
+        gdf_termini_ = gpd.read_file(
+            filename=os.path.join(tmpdirname, "termini_2020_2021_v02.0.shp")
+        ).set_index(keys="Glacier_ID")
+        gdf_termini = gdf_termini_.merge(
+            right=df_glacierid,
+            left_index=True,  # left_on="Glacier_ID"
+            right_index=True,  # right_on="GlacierID"
+        ).sort_index(axis="index")
 
-    return gdf_termini
+        return gdf_termini.to_crs(crs="OGC:CRS84")

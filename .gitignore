@@ -15,3 +15,7 @@ wheels/
 # Spyder project files and directories
 .spyproject/
 *.spyproject
+
+# Data files and folders
+data/**
+!data/**/

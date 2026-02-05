@@ -2664,8 +2664,8 @@ wheels = [
 
 [[package]]
 name = "xopr"
-version = "0.3.1.dev42+g6477fe1a0"
-source = { git = "https://github.com/englacial/xopr.git#6477fe1a0c3380bee8e087d2ae0d36d61af5fad0" }
+version = "0.3.1.dev46+g6b4acde62"
+source = { git = "https://github.com/englacial/xopr.git#6b4acde629f8a98034db46854f84225274f69e1d" }
 dependencies = [
     { name = "aiohttp" },
     { name = "antimeridian" },
