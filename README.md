@@ -7,7 +7,8 @@ Most tidewater glaciers draining the Greenland Ice Sheet are assumed to be groun
 
 ## Goals
 
-- [x] create a reproducible dataset of Greenland grounding points
-- [x] calculate uncertainty in grounding points
-- [x] extend grounding point catalog to Antarctica  
+- [] create a reproducible dataset of Greenland grounding points
+- [] calculate uncertainty in grounding points
+- [] extend grounding point catalog to Antarctica  
+
 
