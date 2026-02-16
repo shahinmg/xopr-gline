@@ -978,6 +978,25 @@ wheels = [
 ]
 
 [[package]]
+name = "hvplot"
+version = "0.12.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "bokeh" },
+    { name = "colorcet" },
+    { name = "holoviews" },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "pandas" },
+    { name = "panel" },
+    { name = "param" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f5/b4/ce73a568fc263efe84cab8de04673949c8f6596f6aeb1531ca2b75b80903/hvplot-0.12.2.tar.gz", hash = "sha256:9e29bbe65f94937d4eeaeccf33566540df936c8f9aeadfa12ea9f306d5237938", size = 7084556, upload-time = "2025-12-18T11:15:37.736Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/11/cd/ec193e471780dfad60e44ded5526c123695c1354910edd537d7aa1d22094/hvplot-0.12.2-py3-none-any.whl", hash = "sha256:0687e2e4d2eeb035c437af0011922abff856054299c121914d903a02b1bb1b22", size = 180626, upload-time = "2025-12-18T11:15:35.091Z" },
+]
+
+[[package]]
 name = "idna"
 version = "3.11"
 source = { registry = "https://pypi.org/simple" }
@@ -2696,6 +2715,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "earthaccess" },
+    { name = "hvplot" },
     { name = "xopr" },
 ]
 
@@ -2707,6 +2727,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "earthaccess", specifier = ">=0.16.0" },
+    { name = "hvplot", specifier = ">=0.12.2" },
     { name = "xopr", git = "https://github.com/englacial/xopr.git" },
 ]
 
