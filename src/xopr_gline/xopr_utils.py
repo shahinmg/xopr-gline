@@ -75,8 +75,7 @@ def surface_bed_reflection_power(stac_item, opr=xopr.opr_access.OPRConnection())
         bed_repicked_twtt.rename('bed_twtt'),
         surface_power.rename('surface_power_dB'),
         bed_power.rename('bed_power_dB'),
-        ],
-        compat='override')
+        ])
 
     flight_line_metadata = frame.drop_vars(['Data', 'Surface'])
     reflectivity_dataset = xr.merge([reflectivity_dataset, flight_line_metadata])
