@@ -19,3 +19,5 @@ wheels/
 # Data files and folders
 data/**
 !data/**/
+notebooks/*.csv
+notebooks/*png

@@ -55,8 +55,8 @@ import matplotlib.patches as mpatches
 # -----------------------------------------------------------------------------
 # 1. Load data
 # -----------------------------------------------------------------------------
-bp = pd.read_csv("bed_power_concat.csv")
-sb = pd.read_csv("surface_bottom.csv")
+bp = pd.read_csv("../data/bed_power_concat.csv")
+sb = pd.read_csv("../data/surface_bottom.csv")
 
 x   = bp["along_track"].values      # m, bed-power grid (~679 m spacing)
 amp = bp["bed_power_dB"].values      # dB, corrected bed echo amplitude

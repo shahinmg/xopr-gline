@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "earthaccess>=0.16.0",
     "hvplot>=0.12.2",
+    "spyder-kernels>=3.0.0,<3.1.0",
     "xopr>=0.3.0",
 ]
 
