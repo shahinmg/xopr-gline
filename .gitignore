@@ -19,3 +19,6 @@ wheels/
 # Data files and folders
 data/**
 !data/**/
+
+CLAUSE.MD
+.vscode/
