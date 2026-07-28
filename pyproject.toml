@@ -21,5 +21,9 @@ xopr = { git = "https://github.com/englacial/xopr.git" }
 
 [dependency-groups]
 dev = [
+    "hvplot>=0.12.2",
+    "ipykernel>=7.3.0",
+    "ipywidgets>=8.1.8",
+    "jupyterlab>=4.6.2",
     "pytest>=9.0.2",
 ]
