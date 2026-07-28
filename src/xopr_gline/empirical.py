@@ -8,23 +8,36 @@ import xarray as xr
 from scipy.special import erf
 from scipy.optimize import curve_fit
 
-def hab(ds: xr.Dataset) -> xr.Dataset:
+def hab(layers: dict, rho_sw=1024, rho_ice=917) -> xr.DataArray:
     """
     Add height above buoyancy and thickness.
 
     Parameters
     ----------
-    ds : xr.Dataset
-        xOPR Dataset with surface and bottom variables.
+    layers: dict
+        A dictionary from opr.get_layers with 'standard:surface' and 
+        'standard:bottom' keys
+    
+    rho_sw: int
+        density of seawater in kg m^-3
+    
+    rho_ice: int
+        density of glacial ice in kg m^-3
 
     Returns
     -------
-    xr.Dataset
-        Dataset with height above buoyancy and thickness added in meters.
+    xr.DataArray
+        DataArray with height above buoyancy in meters.
 
     """
     
-    return ds
+    # calculate thickness
+    H = layers['standard:surface']['wgs84'] - (layers['standard:bottom']['wgs84'])
+    
+    # invert the bottom to make depth positive
+    Hab = H - (rho_sw/rho_ice) * (layers['standard:bottom']['wgs84'] *-1)
+    
+    return Hab
 
 def erf_topography_model(elevation, amp, b, x0, v_off):
     """
