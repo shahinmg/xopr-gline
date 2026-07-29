@@ -289,6 +289,12 @@ wheels = [
 ]
 
 [[package]]
+name = "bayesian-changepoint-detection"
+version = "0.2.dev1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c4/34/3d1d9aba8335b4bb7c1d6f2245e868cf4a6893bdfc802cb2f2cf35e6cf09/bayesian_changepoint_detection-0.2.dev1.tar.gz", hash = "sha256:97ca291d47f0cdd03e7f76739d8edc538cd7305a78df93e12a002ef51100f644", size = 4160, upload-time = "2019-08-12T07:48:10.566Z" }
+
+[[package]]
 name = "beautifulsoup4"
 version = "4.15.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3842,12 +3848,13 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "earthaccess" },
-    { name = "hvplot" },
     { name = "xopr" },
 ]
 
 [package.dev-dependencies]
 dev = [
+    { name = "bayesian-changepoint-detection" },
+    { name = "decorator" },
     { name = "hvplot" },
     { name = "ipykernel" },
     { name = "ipywidgets" },
@@ -3858,12 +3865,13 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "earthaccess", specifier = ">=0.16.0" },
-    { name = "hvplot", specifier = ">=0.12.2" },
     { name = "xopr", git = "https://github.com/englacial/xopr.git" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "bayesian-changepoint-detection", specifier = "==0.2.dev1" },
+    { name = "decorator", specifier = ">=5.3.1" },
     { name = "hvplot", specifier = ">=0.12.2" },
     { name = "ipykernel", specifier = ">=7.3.0" },
     { name = "ipywidgets", specifier = ">=8.1.8" },

@@ -10,7 +10,6 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "earthaccess>=0.16.0",
-    "hvplot>=0.12.2",
     "xopr>=0.3.0",
 ]
 
@@ -22,6 +21,8 @@ xopr = { git = "https://github.com/englacial/xopr.git" }
 
 [dependency-groups]
 dev = [
+    "bayesian-changepoint-detection==0.2.dev1",
+    "decorator>=5.3.1",
     "hvplot>=0.12.2",
     "ipykernel>=7.3.0",
     "ipywidgets>=8.1.8",
