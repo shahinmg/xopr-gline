@@ -20,8 +20,7 @@ def sample_geoid(lat, lon,
     """
     Geoid height above the WGS84 ellipsoid at each lat/lon, in m.
 
-    Nearest-neighbour on BedMachine's 150 m grid. The geoid varies by well
-    under a metre per km, so interpolation buys nothing here.
+    Nearest-neighbour on BedMachine's 150 m grid.
 
     Parameters
     ----------
