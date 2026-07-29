@@ -15,6 +15,7 @@ from scipy.ndimage import uniform_filter1d
 
 # The PyPI release of bayesian-changepoint-detection predates SciPy 1.0 and
 # imports comb/logsumexp from scipy.misc, where they no longer live.
+# TODO: change this soon. Use a more modern approach to handling scipy dependencies.
 if not hasattr(scipy.misc, "comb"):
     scipy.misc.comb = scipy.special.comb
 if not hasattr(scipy.misc, "logsumexp"):
