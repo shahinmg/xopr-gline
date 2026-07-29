@@ -53,10 +53,15 @@ def extract_layer_peak_power(radar_ds, layer_twtt, margin_twtt):
     
     return peak_twtt, peak_power
 
-def surface_bed_reflection_power(stac_item, opr=xopr.opr_access.OPRConnection()):
+def surface_bed_reflection_power(stac_item, opr=xopr.opr_access.OPRConnection(),
+                                 resample_interval='5s'):
+    """
+    resample_interval sets the along-track sample spacing: at ~143 m/s ground
+    speed, '5s' gives ~717 m and '2s' gives ~287 m.
+    """
 
     frame = opr.load_frame(stac_item, data_product='CSARP_standard')
-    frame = frame.resample(slow_time='5s').mean()
+    frame = frame.resample(slow_time=resample_interval).mean()
 
     layers = opr.get_layers(frame, source='auto', include_geometry=False)
     if layers is None:
@@ -82,7 +87,8 @@ def surface_bed_reflection_power(stac_item, opr=xopr.opr_access.OPRConnection())
 
     reflectivity_dataset = reflectivity_dataset.drop_dims(['twtt'])  # Remove the twtt dimension since everything has been flattened
 
-    attributes_to_copy = ['season', 'segment', 'doi', 'ror', 'funder_text']
+    # 'granule' is required by xopr.merge_frames, which parses it.
+    attributes_to_copy = ['season', 'segment', 'granule', 'doi', 'ror', 'funder_text']
     reflectivity_dataset.attrs = {attr: frame.attrs[attr] for attr in attributes_to_copy if attr in frame.attrs}
 
     return reflectivity_dataset

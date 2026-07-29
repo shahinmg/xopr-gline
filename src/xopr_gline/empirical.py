@@ -8,7 +8,10 @@ import xarray as xr
 from scipy.special import erf
 from scipy.optimize import curve_fit
 
-def hab(layers: dict, rho_sw=1024, rho_ice=917) -> xr.DataArray:
+from .constants import DEFAULT_CONSTANTS
+
+def hab(layers: dict, rho_sw=DEFAULT_CONSTANTS.rho_sw,
+        rho_ice=DEFAULT_CONSTANTS.rho_ice) -> xr.DataArray:
     """
     Add height above buoyancy and thickness.
 

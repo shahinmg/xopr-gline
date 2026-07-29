@@ -2,6 +2,7 @@
 Tests for emperical functions.
 """
 
+from xopr_gline.constants import DEFAULT_CONSTANTS
 from xopr_gline.empirical import hab
 import xopr.opr_access
 import pytest
@@ -61,7 +62,8 @@ class TestHab:
 
     def test_hab_formula_matches_manual_calculation(self, result, layers):
         """Cross-check output against manually applying the formula."""
-        rho_sw, rho_ice = 1024, 917
+        rho_sw = DEFAULT_CONSTANTS.rho_sw
+        rho_ice = DEFAULT_CONSTANTS.rho_ice
         surface = layers["standard:surface"]["wgs84"]
         bottom = layers["standard:bottom"]["wgs84"]
         H = surface - bottom
