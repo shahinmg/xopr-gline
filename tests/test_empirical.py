@@ -39,10 +39,14 @@ def layers():
     }
 
 
+# Geoid separation over the Petermann test segment
+GEOID_M = 14.0
+
+
 @pytest.fixture(scope="module")
 def result(layers):
     """Run hab once and reuse across all tests."""
-    return hab(layers)
+    return hab(layers, GEOID_M)
 
 
 # --- Tests ---
@@ -64,18 +68,31 @@ class TestHab:
         """Cross-check output against manually applying the formula."""
         rho_sw = DEFAULT_CONSTANTS.rho_sw
         rho_ice = DEFAULT_CONSTANTS.rho_ice
-        surface = layers["standard:surface"]["wgs84"]
-        bottom = layers["standard:bottom"]["wgs84"]
+        surface = layers["standard:surface"]["wgs84"] - GEOID_M
+        bottom = layers["standard:bottom"]["wgs84"] - GEOID_M
         H = surface - bottom
         expected = H - (rho_sw / rho_ice) * (bottom * -1)
         np.testing.assert_allclose(result.values, expected.values)
 
     def test_custom_densities_differ_from_defaults(self, result, layers):
         """Changing densities should produce a different result."""
-        result_custom = hab(layers, rho_sw=1025, rho_ice=900)
+        result_custom = hab(layers, GEOID_M, rho_sw=1025, rho_ice=900)
         assert not np.allclose(result.values, result_custom.values, equal_nan=True)
 
     def test_dimensions_preserved(self, result, layers):
         """Output dimensions should match input surface dimensions."""
         expected_dims = layers["standard:surface"]["wgs84"].dims
         assert result.dims == expected_dims
+
+    def test_geoid_is_required(self, layers):
+        """Omitting the geoid must fail rather than silently biasing Hab."""
+        with pytest.raises(TypeError):
+            hab(layers)
+
+    def test_geoid_shifts_hab_by_density_ratio(self, result, layers):
+        """Hab shifts by (rho_sw/rho_ice) * delta_geoid, not by delta_geoid."""
+        shifted = hab(layers, GEOID_M + 10.0)
+        ratio = DEFAULT_CONSTANTS.rho_sw / DEFAULT_CONSTANTS.rho_ice
+        np.testing.assert_allclose(
+            (result - shifted).values, ratio * 10.0, rtol=1e-9
+        )
