@@ -20,6 +20,7 @@ wheels/
 data/**
 !data/**/
 
-CLAUSE.MD
+CLAUDE.md
+TODO.md
 .vscode/
 lit/
