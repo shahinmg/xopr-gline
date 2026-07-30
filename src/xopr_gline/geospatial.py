@@ -5,9 +5,23 @@ Functions for retrieving geospatial datasets and making spatiotemporal queries.
 import datetime
 import os
 import tempfile
+from pathlib import Path
+from typing import Iterable, Optional, Union
 
 import earthaccess
 import geopandas as gpd
+import requests
+import rioxarray  # noqa: F401  registers the .rio accessor
+import xarray as xr
+from tqdm.auto import tqdm
+
+ITSLIVE_VELOCITY_URLS = {
+    "vx": "https://its-live-data.s3.amazonaws.com/velocity_mosaic/v2.1/static/cog/"
+          "ITS_LIVE_velocity_120m_RGI05A_0000_V02.1_vx.tif",
+    "vy": "https://its-live-data.s3.amazonaws.com/velocity_mosaic/v2.1/static/cog/"
+          "ITS_LIVE_velocity_120m_RGI05A_0000_V02.1_vy.tif",
+}
+DEFAULT_ITSLIVE_DIR = Path("data/its_live")
 
 
 def get_greenland_termini(end_year: int = 2021) -> gpd.GeoDataFrame:
@@ -65,3 +79,119 @@ def get_greenland_termini(end_year: int = 2021) -> gpd.GeoDataFrame:
         ).sort_index(axis="index")
 
         return gdf_termini.to_crs(crs="OGC:CRS84")
+
+
+def get_itslive_velocity(
+    components: Iterable[str] = ("vx", "vy"),
+    directory: Union[str, Path, None] = None,
+    overwrite: bool = False,
+) -> dict[str, Path]:
+    """
+    Download the ITS_LIVE 120 m Greenland (RGI05A) velocity mosaic components.
+
+    Citation:
+    - Gardner, A. S., Fahnestock, M. A. & Scambos, T. A. (2025). MEaSUREs
+      ITS_LIVE Regional Glacier and Ice Sheet Surface Velocities, Version 2.
+      [Data Set]. NASA National Snow and Ice Data Center Distributed Active
+      Archive Center. https://doi.org/10.5067/9SM8CTFHF3AZ.
+
+    Parameters
+    ----------
+    components : iterable of str
+        Which components to fetch. Keys of ITSLIVE_VELOCITY_URLS.
+
+    directory : str or Path or None
+        Where to save the COGs. Defaults to data/its_live.
+
+    overwrite : bool
+        Re-download even if the file exists.
+
+    Returns
+    -------
+    dict[str, Path]
+        Component name to downloaded GeoTIFF.
+    """
+    directory = Path(directory) if directory is not None else DEFAULT_ITSLIVE_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+
+    paths = {}
+    for component in components:
+        if component not in ITSLIVE_VELOCITY_URLS:
+            raise KeyError(f"unknown component {component!r}; expected one of "
+                           f"{sorted(ITSLIVE_VELOCITY_URLS)}")
+        url = ITSLIVE_VELOCITY_URLS[component]
+        destination = directory / url.rsplit("/", 1)[-1]
+        paths[component] = destination
+
+        if destination.exists() and not overwrite:
+            continue
+
+        # Stream to a .part file so an interrupted download is not mistaken for
+        # a complete one on the next call.
+        partial = destination.with_suffix(destination.suffix + ".part")
+        with requests.get(url, stream=True, timeout=60) as response:
+            response.raise_for_status()
+            total = int(response.headers.get("Content-Length", 0)) or None
+            with open(partial, "wb") as f, tqdm(
+                total=total, unit="B", unit_scale=True, desc=destination.name
+            ) as progress:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    f.write(chunk)
+                    progress.update(len(chunk))
+
+        partial.replace(destination)
+
+    return paths
+
+
+def open_itslive_velocity(
+    component: str = "vx",
+    path: Union[str, Path, None] = None,
+    directory: Union[str, Path, None] = None,
+    chunks: Optional[dict] = None,
+) -> xr.DataArray:
+    """
+    Open an ITS_LIVE velocity component, lazily, in m/yr on EPSG:3413.
+
+    Parameters
+    ----------
+    component : str
+        Key of ITSLIVE_VELOCITY_URLS, i.e. 'vx' or 'vy'.
+
+    path : str or Path or None
+        Explicit file to open, skipping the cache lookup.
+
+    directory : str or Path or None
+        Where to look for a cached download. Defaults to data/its_live.
+
+    chunks : dict or None
+        Dask chunks. Defaults to the COG's 512 px tiling.
+
+    Returns
+    -------
+    xr.DataArray
+        The component, band dimension squeezed out.
+    """
+    if component not in ITSLIVE_VELOCITY_URLS:
+        raise KeyError(f"unknown component {component!r}; expected one of "
+                       f"{sorted(ITSLIVE_VELOCITY_URLS)}")
+
+    url = ITSLIVE_VELOCITY_URLS[component]
+    if path is not None:
+        source = str(path)
+    else:
+        directory = Path(directory) if directory is not None else DEFAULT_ITSLIVE_DIR
+        cached = directory / url.rsplit("/", 1)[-1]
+        source = str(cached) if cached.exists() else url
+
+    if source.startswith("http"):
+        # Stop GDAL listing the bucket prefix on every open, which costs a
+        # round trip per read and finds nothing useful here.
+        os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+
+    da = rioxarray.open_rasterio(
+        source, masked=True, chunks=chunks or {"x": 512, "y": 512}
+    )
+    if "band" in da.dims and da.sizes["band"] == 1:
+        da = da.squeeze("band", drop=True)
+    return da.rename(component)

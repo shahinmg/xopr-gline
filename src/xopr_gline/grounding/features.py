@@ -1,9 +1,5 @@
 """
-Features computed from a GlacierProfile.
-
-Each feature returns an array aligned to profile.x. Filter cutoffs are given as
-physical wavelengths in km, not Butterworth Wn, so the same spec means the same
-thing on any flight.
+Features computed from a GlacierProfile
 """
 
 from abc import ABC, abstractmethod
@@ -78,8 +74,7 @@ class AmplitudeGradient(Feature):
     d(amplitude)/dx, dB/km.
 
     Regions with no bed pick are masked from the data itself via
-    profile.nan_blocks(), not from hardcoded along-track bounds. Values beyond
-    max_abs are treated as artifacts.
+    profile.nan_blocks()
     """
 
     name = "dA"
