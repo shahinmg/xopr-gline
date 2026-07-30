@@ -8,19 +8,29 @@ import xarray as xr
 from scipy.special import erf
 from scipy.optimize import curve_fit
 
-def hab(layers: dict, rho_sw=1024, rho_ice=917) -> xr.DataArray:
+from .constants import DEFAULT_CONSTANTS
+
+def hab(layers: dict, geoid_m, rho_sw=DEFAULT_CONSTANTS.rho_sw,
+        rho_ice=DEFAULT_CONSTANTS.rho_ice) -> xr.DataArray:
     """
-    Add height above buoyancy and thickness.
+    Height above buoyancy.
 
     Parameters
     ----------
     layers: dict
-        A dictionary from opr.get_layers with 'standard:surface' and 
+        A dictionary from opr.get_layers with 'standard:surface' and
         'standard:bottom' keys
-    
+
+    geoid_m: float or array
+        Geoid height above the WGS84 ellipsoid, in m. Required, and deliberately
+        without a default: xOPR 'wgs84' elevations are ellipsoidal, and using
+        them directly overestimates Hab by (rho_sw/rho_ice) * geoid_m, which is
+        ~14 m at Petermann and ~55 m at Helheim. Sample it with
+        grounding.geoid.sample_geoid.
+
     rho_sw: int
         density of seawater in kg m^-3
-    
+
     rho_ice: int
         density of glacial ice in kg m^-3
 
@@ -30,13 +40,16 @@ def hab(layers: dict, rho_sw=1024, rho_ice=917) -> xr.DataArray:
         DataArray with height above buoyancy in meters.
 
     """
-    
-    # calculate thickness
-    H = layers['standard:surface']['wgs84'] - (layers['standard:bottom']['wgs84'])
-    
+
+    # Heights above sea level; thickness is unaffected but the bed term is not.
+    surface = layers['standard:surface']['wgs84'] - geoid_m
+    bottom = layers['standard:bottom']['wgs84'] - geoid_m
+
+    H = surface - bottom
+
     # invert the bottom to make depth positive
-    Hab = H - (rho_sw/rho_ice) * (layers['standard:bottom']['wgs84'] *-1)
-    
+    Hab = H - (rho_sw/rho_ice) * (bottom * -1)
+
     return Hab
 
 def erf_topography_model(elevation, amp, b, x0, v_off):
