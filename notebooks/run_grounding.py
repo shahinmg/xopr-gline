@@ -25,7 +25,7 @@ import xopr.opr_access
 
 from xopr_gline.grounding import (BOCPDDetector, GlacierProfile,
                                   GradientDetector, OnsetDetector,
-                                  transition_width_km)
+                                  select_flotation_leg, transition_width_km)
 
 
 def parse_slice(text):
@@ -52,6 +52,9 @@ def main():
     p.add_argument("--crop_lo", type=float, default=None,
                    help="restrict the profile to valid data before detecting")
     p.add_argument("--crop_hi", type=float, default=None)
+    p.add_argument("--auto_leg", action="store_true",
+                   help="crop to the along-flow leg that crosses flotation, "
+                        "using ITS_LIVE velocities. Splits out-and-back lines")
     p.add_argument("--baseline_km", type=float, default=20.0,
                    help="length of the onset reference stretch")
     p.add_argument("--min_baseline_km", type=float, default=8.0)
@@ -93,6 +96,16 @@ def main():
             args.crop_hi if args.crop_hi is not None else profile.extent[1],
         )
 
+    leg = None
+    if args.auto_leg:
+        leg = select_flotation_leg(profile, margin_km=args.margin_km)
+        if leg is None:
+            raise SystemExit(
+                "no along-flow leg crosses flotation with bed power to work "
+                "from; crop by hand or drop --auto_leg"
+            )
+        profile = profile.window(*leg)
+
     if args.search_lo is not None and args.search_hi is not None:
         window = (args.search_lo, args.search_hi)
         how = "explicit"
@@ -103,6 +116,8 @@ def main():
     print(f"\n{profile.source}")
     print(f"  samples       : {profile.n}  dx={profile.dx*1000:.0f} m")
     print(f"  extent        : {profile.extent[0]:.2f} - {profile.extent[1]:.2f} km")
+    if leg is not None:
+        print(f"  along-flow leg: {leg[0]:.2f} - {leg[1]:.2f} km  [auto]")
     g = profile.geoid_separation_m
     g_txt = (f"{float(g):.1f} m" if not np.ndim(g)
              else f"{np.nanmin(g):.1f} - {np.nanmax(g):.1f} m (sampled)")
