@@ -60,11 +60,6 @@ uv run python notebooks/run_grounding.py \
   disagree by a median 52 m over Helheim's grounded leg but only 15 m near the
   grounding point, so the handover there is barely visible; it is drawn raw
   rather than tied to the radar bed.
-- Every run prints a `terminus check`, saying whether the grounding point is
-  the calving front. Helheim comes back `grounded_terminus` — it really does
-  ground 1.3 km inboard of its face. `terminus_artifact` means the ice behind
-  the front is afloat, so the detector found the ice/water contrast rather than
-  a grounding transition, and the result should not be used.
 - The search window defaults to the flotation crossing +/- `--margin_km`
   (12 km). `--search_lo/--search_hi` override it.
 - `--normalised` adds a standardised-feature BOCPD run alongside the raw one.

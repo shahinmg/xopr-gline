@@ -22,5 +22,3 @@ from .result import DetectionResult as DetectionResult
 from .screening import SegmentScreen as SegmentScreen
 from .screening import screen_profile as screen_profile
 from .result import transition_width_km as transition_width_km
-from .terminus import TerminusVerdict as TerminusVerdict
-from .terminus import classify_terminus as classify_terminus

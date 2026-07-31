@@ -25,8 +25,7 @@ import xopr.opr_access
 
 from xopr_gline.grounding import (BOCPDDetector, GlacierProfile,
                                   GradientDetector, OnsetDetector,
-                                  classify_terminus, select_flotation_leg,
-                                  transition_width_km)
+                                  select_flotation_leg, transition_width_km)
 
 
 def parse_slice(text):
@@ -169,13 +168,6 @@ def main():
     else:
         print(f"\n  grounding point (changepoint): {changepoint.map_km:.2f} km"
               f"  [onset skipped]")
-
-    headline = onset if onset is not None else changepoint
-    verdict = classify_terminus(profile, headline)
-    print(f"  terminus check            : {verdict}")
-    if verdict.suspect:
-        print("    the bed-power step here is the ice/water contrast at the "
-              "front, not a grounding transition")
 
     if args.gz_lo is not None:
         hi = args.gz_hi if args.gz_hi is not None else args.gz_lo
