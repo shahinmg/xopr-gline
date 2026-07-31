@@ -61,6 +61,31 @@ def test_short_puddles_are_ignored():
     assert len(lake.terminus_crossings_km(min_open_km=1.0)) == 2
 
 
+def test_flotation_window_is_cut_at_the_terminus():
+    """
+    The window must not run past the calving front. Thickness tapers to the
+    grounding transition and then collapses to open water; without the clamp
+    the window would extend over the water and hand the detectors an ice/water
+    contrast to lock onto.
+    """
+    thickness = np.concatenate([
+        np.linspace(900, 400, 30),     # grounded, well above flotation
+        np.linspace(400, 330, 10),     # approaching flotation
+        np.full(15, 1.0),              # open water past the front
+    ])
+    profile = _profile(thickness, surface=np.concatenate([
+        np.linspace(400, 120, 30), np.linspace(120, 60, 10), np.full(15, 55.0),
+    ]), geoid=49.0)
+
+    terminus = profile.terminus_crossings_km()
+    assert terminus, "fixture should contain a calving front"
+
+    lo, hi = profile.flotation_window(margin_km=12.0)
+    assert hi <= terminus[-1]
+    # Unclamped, a 12 km margin would have reached the profile's end.
+    assert hi < profile.x[-1]
+
+
 def test_open_water_would_read_as_near_flotation():
     """
     Why ice_mask exists: with thickness ~ 0 the flotation residual collapses to

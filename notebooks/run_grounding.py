@@ -25,7 +25,8 @@ import xopr.opr_access
 
 from xopr_gline.grounding import (BOCPDDetector, GlacierProfile,
                                   GradientDetector, OnsetDetector,
-                                  select_flotation_leg, transition_width_km)
+                                  classify_terminus, select_flotation_leg,
+                                  transition_width_km)
 
 
 def parse_slice(text):
@@ -47,6 +48,9 @@ def main():
     p.add_argument("--geoid", default=None,
                    help="geoid separation: a number in m, or a path to "
                         "BedMachine to sample it along the flight line")
+    p.add_argument("--bathymetry", default=None,
+                   help="BedMachine path to draw the seabed under the floating "
+                        "ice from. Figure only; the radar picks are untouched")
     p.add_argument("--dx_km", type=float, default=None,
                    help="grid spacing; default is the bed-power spacing")
     p.add_argument("--crop_lo", type=float, default=None,
@@ -58,6 +62,10 @@ def main():
     p.add_argument("--baseline_km", type=float, default=20.0,
                    help="length of the onset reference stretch")
     p.add_argument("--min_baseline_km", type=float, default=8.0)
+    p.add_argument("--no_onset", action="store_true",
+                   help="skip the onset detector. Use where no floating ice "
+                        "sits downflow of the window to take a baseline from, "
+                        "e.g. a glacier calving at its grounding zone")
     p.add_argument("--search_lo", type=float, default=None)
     p.add_argument("--search_hi", type=float, default=None)
     p.add_argument("--margin_km", type=float, default=12.0,
@@ -129,11 +137,14 @@ def main():
     print(f"  bed-power gaps: {len(gaps)}"
           + (f"  {[(round(a,1), round(b,1)) for a, b in gaps[:4]]}" if gaps else ""))
 
-    onset = OnsetDetector(baseline_km=args.baseline_km,
-                          min_baseline_km=args.min_baseline_km
-                          ).detect(profile, window)
+    onset = None
+    if not args.no_onset:
+        onset = OnsetDetector(baseline_km=args.baseline_km,
+                              min_baseline_km=args.min_baseline_km
+                              ).detect(profile, window)
     changepoint = BOCPDDetector().detect(profile, window)
-    results = [onset, changepoint, GradientDetector().detect(profile, window)]
+    results = ([onset] if onset is not None else []) + [
+        changepoint, GradientDetector().detect(profile, window)]
     if args.normalised:
         results.append(BOCPDDetector(normalise=True).detect(profile, window))
 
@@ -149,11 +160,22 @@ def main():
             print(f"    baseline {r.extra['baseline_dB']:.1f} dB "
                   f"+/- {r.extra['sigma_dB']:.2f} from {lo_b:.1f}-{hi_b:.1f} km")
 
-    width = transition_width_km(onset, changepoint,
-                                profile.landward_sign())
-    print(f"\n  grounding point (onset)   : {onset.map_km:.2f} km")
-    print(f"  transition width          : {width:.2f} km  "
-          f"(onset -> steepest; wide means a diffuse zone)")
+    if onset is not None:
+        width = transition_width_km(onset, changepoint,
+                                    profile.landward_sign())
+        print(f"\n  grounding point (onset)   : {onset.map_km:.2f} km")
+        print(f"  transition width          : {width:.2f} km  "
+              f"(onset -> steepest; wide means a diffuse zone)")
+    else:
+        print(f"\n  grounding point (changepoint): {changepoint.map_km:.2f} km"
+              f"  [onset skipped]")
+
+    headline = onset if onset is not None else changepoint
+    verdict = classify_terminus(profile, headline)
+    print(f"  terminus check            : {verdict}")
+    if verdict.suspect:
+        print("    the bed-power step here is the ice/water contrast at the "
+              "front, not a grounding transition")
 
     if args.gz_lo is not None:
         hi = args.gz_hi if args.gz_hi is not None else args.gz_lo
@@ -173,8 +195,10 @@ def main():
         gz = None
         if args.gz_lo is not None:
             gz = (args.gz_lo, args.gz_hi if args.gz_hi is not None else args.gz_lo)
+        # Title is the provenance alone; how the window was set is printed
+        # above and shown by the shaded band.
         plot_detection(profile, results, args.fig, gz=gz,
-                       title=f"{profile.source}  -  {how} window")
+                       bathymetry=args.bathymetry)
         print(f"\n  figure: {args.fig}")
 
 

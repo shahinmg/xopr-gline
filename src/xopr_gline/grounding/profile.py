@@ -229,7 +229,8 @@ class GlacierProfile:
 
     def flotation_window(self, margin_km: float = 12.0,
                          threshold_m: float = 30.0,
-                         smooth_km: float = 5.0) -> tuple:
+                         smooth_km: float = 5.0,
+                         min_thickness_m: float = 25.0) -> tuple:
         """
         Search window derived from where the ice becomes grounded.
 
@@ -240,6 +241,12 @@ class GlacierProfile:
         noise rather than signal. This uses the first sustained rise above
         threshold_m on the smoothed residual, matching the >30 m "grounded"
         classification the CSV-era script used for plotting.
+
+        The seaward edge is cut at the terminus: past the calving front there is
+        no ice to ground, and with thickness ~ 0 the residual drops back under
+        the threshold, so an unclamped window hands the detectors open water and
+        invites a changepoint on the ice/water contrast instead of the grounding
+        transition.
         """
         sign = self.landward_sign(smooth_km)
         grounded = self.smoothed_residual(smooth_km) > threshold_m
@@ -263,9 +270,45 @@ class GlacierProfile:
         x_cross = float(self.x[idx])
         lo = max(float(self.x[0]), x_cross - margin_km)
         hi = min(float(self.x[-1]), x_cross + margin_km)
+
+        # Seaward is decreasing x when x increases landward, and vice versa.
+        # The seaward edge snaps to the terminus rather than merely being capped
+        # by it: the grounding point must lie between the crossing and the
+        # calving front, so stopping a margin short of the front would leave
+        # part of the answer outside the search. Only termini within reach are
+        # used, so a long shelf does not stretch the window to its front.
+        reach = 2.0 * margin_km
+        for terminus in self.terminus_crossings_km(min_thickness_m):
+            if abs(terminus - x_cross) > reach:
+                continue
+            if sign > 0 and terminus <= x_cross:
+                lo = terminus
+            elif sign < 0 and terminus >= x_cross:
+                hi = terminus
+
+        if not hi > lo:
+            raise ValueError(
+                f"window collapses at the terminus: the flotation crossing at "
+                f"{x_cross:.1f} km sits at the calving front, leaving no "
+                f"grounded ice to search. Pass an explicit search window."
+            )
         return lo, hi
 
     # -- terminus ---------------------------------------------------------
+    @property
+    def degenerate_pick(self) -> np.ndarray:
+        """
+        True where the bottom pick sits exactly on the surface pick.
+
+        That is the layer picker finding no bottom return and defaulting to the
+        surface, not a measurement of zero-thickness ice. It has to be told
+        apart from open water, which also has thickness near zero: on Petermann
+        69 of 70 samples inboard of 20 km are exactly zero with bed power 8 dB
+        *dimmer* than the shelf, whereas Helheim's real calving front gives
+        scattered non-zero thicknesses and a 73 dB brightening off the water.
+        """
+        return self.h_surf == self.h_bed
+
     def ice_mask(self, min_thickness_m: float = 25.0) -> np.ndarray:
         """
         True where there is real ice, i.e. a measured thickness above the floor.
@@ -288,7 +331,7 @@ class GlacierProfile:
         terminus. Returns the ice-side x of each boundary.
         """
         ice = self.ice_mask(min_thickness_m)
-        water = np.isfinite(self.thickness) & ~ice
+        water = np.isfinite(self.thickness) & ~ice & ~self.degenerate_pick
 
         crossings = []
         for start, stop in _mask_runs(water):

@@ -7,11 +7,13 @@ ice/water/earth layers with black interfaces, GMT frames, legends outside the
 axes, and A/B labels on the section ends.
 """
 
+from pathlib import Path
 from typing import Optional, Sequence
 
 import numpy as np
 
 from . import features as _features
+from .geoid import sample_bedmachine
 from .profile import GlacierProfile
 from .result import DetectionResult
 
@@ -69,10 +71,17 @@ def plot_detection(profile: GlacierProfile,
                    pad_km: float = 25.0,
                    title: Optional[str] = None,
                    fill_layers: bool = True,
-                   project_bathymetry: bool = True):
+                   project_bathymetry: bool = True,
+                   bathymetry=None):
     """
     Four panels: geometry, the flotation residual that set the window, bed
     power, and the posterior.
+
+    bathymetry gives the seabed under the floating ice, where radar stops at the
+    ice bottom: a path to BedMachine to sample 'bed' along the flight line, or
+    an array of elevations on the profile's grid. Without it the seabed is drawn
+    flat at its depth at the grounding point. Either way the radar picks are
+    untouched; this only sets the projected bed line.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -110,7 +119,12 @@ def plot_detection(profile: GlacierProfile,
 
         # -- geometry -----------------------------------------------------
         ax = axs[0]
-        _tight_ylim(ax, profile.h_bed[vis], profile.h_surf[vis])
+        # The seabed sets the floor along with the picks: BedMachine's trough
+        # runs 200 m below Helheim's deepest bed pick and would be clipped off.
+        bathy = _resolve_bathymetry(profile, bathymetry)
+        floor = (profile.h_bed[vis] if bathy is None
+                 else np.concatenate([profile.h_bed[vis], bathy[vis]]))
+        _tight_ylim(ax, floor, profile.h_surf[vis])
         # Gaps in the layer picks are bridged so the section reads continuously,
         # and the bridges are dashed: interpolated, not measured.
         surf, surf_gap = _interp_gaps(profile.x, profile.h_surf)
@@ -135,15 +149,16 @@ def plot_detection(profile: GlacierProfile,
             projected = _fill_section(ax, profile, surf, bed,
                                       np.where(patched, profile.h_bed, bed),
                                       ice, ahead, grounded, sea_level, gp,
-                                      project_bathymetry)
+                                      project_bathymetry, bathy)
             handles += [Patch(fc=LAYER_C["ice"], ec="black", lw=0.8, label="Ice"),
                         Patch(fc=LAYER_C["water"], ec="black", lw=0.8,
                               label="Water"),
                         Patch(fc=LAYER_C["earth"], ec="black", lw=0.8,
                               label="Bed")]
             if projected is not None:
+                source = "BedMachine" if bathymetry is not None else "projected"
                 handles.append(Line2D([], [], color="black", lw=1.2, ls="--",
-                                      label="Bed (projected)"))
+                                      label=f"Bed ({source})"))
             surf_c = bed_c = "black"
         else:
             surf_c, bed_c = C["surf"], C["bed"]
@@ -326,7 +341,7 @@ def _sea_level(profile) -> float:
 
 
 def _fill_section(ax, profile, surf, bed, ice_bottom, ice, ahead, grounded,
-                  sea_level, gp_km, project_bathymetry=True):
+                  sea_level, gp_km, project_bathymetry=True, bathymetry=None):
     """
     Ice, water and earth polygons in polartoolkit's layer colours.
 
@@ -341,10 +356,14 @@ def _fill_section(ax, profile, surf, bed, ice_bottom, ice, ahead, grounded,
     y0 = ax.get_ylim()[0]
     seabed = np.where(grounded, bed, np.nan)
     projected = None
-    if project_bathymetry:
+    if bathymetry is not None:
+        projected = np.where(grounded | ~np.isfinite(bathymetry), np.nan,
+                             np.maximum(bathymetry, y0))
+    elif project_bathymetry:
         projected = _project_seabed(profile, bed, gp_km, grounded, ice, y0)
-        if projected is not None:
-            seabed = np.where(grounded, bed, projected)
+    if projected is not None:
+        seabed = np.where(np.isfinite(projected), projected,
+                          np.where(grounded, bed, np.nan))
 
     ax.fill_between(profile.x, y0, seabed, where=np.isfinite(seabed),
                     color=LAYER_C["earth"], lw=0, zorder=2)
@@ -364,6 +383,29 @@ def _fill_section(ax, profile, surf, bed, ice_bottom, ice, ahead, grounded,
         ax.plot(np.where(grounded, np.nan, profile.x), projected, color="black",
                 lw=1.2, ls="--", zorder=5)
     return projected
+
+
+def _resolve_bathymetry(profile, spec):
+    """
+    Seabed elevations on the profile's grid, in its ellipsoidal datum.
+
+    A path is read as BedMachine and sampled along the flight line. Its bed sits
+    on the geoid, so the profile's geoid separation is added to bring it onto
+    the ellipsoid with the radar picks, which are left alone.
+    """
+    if spec is None:
+        return None
+    if isinstance(spec, (str, Path)):
+        if profile.lat is None or profile.lon is None:
+            raise ValueError("profile has no coordinates to sample BedMachine "
+                             "along; pass an array of elevations instead")
+        bed = sample_bedmachine(profile.lat, profile.lon, "bed", path=spec)
+        return bed + profile.geoid_separation_m
+    values = np.asarray(spec, dtype=float)
+    if values.shape != profile.x.shape:
+        raise ValueError(f"bathymetry has shape {values.shape}, expected "
+                         f"{profile.x.shape}")
+    return values
 
 
 def _project_seabed(profile, bed, gp_km, grounded, ice, floor, window_km=2.0,

@@ -1,5 +1,5 @@
 """
-Geoid sampling from BedMachine.
+Geoid and bed sampling from BedMachine.
 """
 
 from pathlib import Path
@@ -11,6 +11,32 @@ import xarray as xr
 
 DEFAULT_BEDMACHINE = Path("data/bedmachine/BedMachineGreenland-v5.nc")
 BEDMACHINE_CRS = "EPSG:3413"
+
+
+def sample_bedmachine(lat, lon,
+                      variable: str = "geoid",
+                      path: Union[str, Path, None] = None,
+                      crs: str = BEDMACHINE_CRS) -> np.ndarray:
+    """
+    A BedMachine variable at each lat/lon, in m.
+
+    Nearest-neighbour on BedMachine's 150 m grid. Note the datums differ:
+    'geoid' is height above the WGS84 ellipsoid, while 'bed' and 'surface' are
+    heights above that geoid, so adding the geoid puts them on the ellipsoid
+    with xOPR's elevations.
+
+    Parameters
+    ----------
+    lat, lon: array-like
+        Point coordinates in degrees.
+
+    variable: str
+        Variable to sample, e.g. 'geoid' or 'bed'.
+
+    path: str or Path or None
+        BedMachine NetCDF. Defaults to data/bedmachine/BedMachineGreenland-v5.nc.
+    """
+    return _sample(lat, lon, variable, path, crs)
 
 
 def sample_geoid(lat, lon,
@@ -33,6 +59,10 @@ def sample_geoid(lat, lon,
     variable: str
         Name of the geoid variable in the file.
     """
+    return _sample(lat, lon, variable, path, crs)
+
+
+def _sample(lat, lon, variable, path, crs) -> np.ndarray:
     path = Path(path) if path is not None else DEFAULT_BEDMACHINE
     if not path.exists():
         raise FileNotFoundError(
