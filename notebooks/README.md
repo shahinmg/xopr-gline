@@ -46,9 +46,7 @@ uv run python notebooks/run_grounding.py \
     --fig data/figs/petermann_geoid.png
 ```
 
-`--gz_lo/--gz_hi` are the InSAR grounding zone. They are printed for
-comparison only and never steer the search — expect the grounding point
-slightly downflow of the seaward edge (a small negative offset).
+`--gz_lo/--gz_hi` are the InSAR grounding zone.
 
 ## Notes
 
