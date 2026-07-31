@@ -51,7 +51,8 @@ class GlacierProfile:
         Bed echo power in dB. NaN where no bed pick exists.
 
     h_surf, h_bed: np.ndarray
-        Ice surface and bed elevation in m WGS84.
+        Ice surface and bed elevation in m WGS84. NaN across stretches with no
+        layer pick, rather than a straight line drawn over the gap.
 
     constants: PhysicalConstants
         Densities used by the flotation properties.
@@ -228,7 +229,8 @@ class GlacierProfile:
 
     def flotation_window(self, margin_km: float = 12.0,
                          threshold_m: float = 30.0,
-                         smooth_km: float = 5.0) -> tuple:
+                         smooth_km: float = 5.0,
+                         min_thickness_m: float = 25.0) -> tuple:
         """
         Search window derived from where the ice becomes grounded.
 
@@ -239,6 +241,10 @@ class GlacierProfile:
         noise rather than signal. This uses the first sustained rise above
         threshold_m on the smoothed residual, matching the >30 m "grounded"
         classification the CSV-era script used for plotting.
+
+        The seaward edge is cut at the terminus. Past the front the residual
+        drops back under the threshold, so an unclamped window would hand the
+        detectors open water to find a changepoint in.
         """
         sign = self.landward_sign(smooth_km)
         grounded = self.smoothed_residual(smooth_km) > threshold_m
@@ -262,7 +268,72 @@ class GlacierProfile:
         x_cross = float(self.x[idx])
         lo = max(float(self.x[0]), x_cross - margin_km)
         hi = min(float(self.x[-1]), x_cross + margin_km)
+
+        # The seaward edge snaps to the terminus rather than being capped by it:
+        # the grounding point must lie between the crossing and the front. Only
+        # termini within reach count, so a long shelf cannot stretch the window.
+        reach = 2.0 * margin_km
+        for terminus in self.terminus_crossings_km(min_thickness_m):
+            if abs(terminus - x_cross) > reach:
+                continue
+            if sign > 0 and terminus <= x_cross:
+                lo = terminus
+            elif sign < 0 and terminus >= x_cross:
+                hi = terminus
+
+        if not hi > lo:
+            raise ValueError(
+                f"window collapses at the terminus: the flotation crossing at "
+                f"{x_cross:.1f} km sits at the calving front, leaving no "
+                f"grounded ice to search. Pass an explicit search window."
+            )
         return lo, hi
+
+    # -- terminus ---------------------------------------------------------
+    @property
+    def degenerate_pick(self) -> np.ndarray:
+        """
+        True where the bottom pick sits exactly on the surface pick.
+
+        That is the picker finding no bottom return and defaulting to the
+        surface, not zero-thickness ice. Open water also reads near zero but
+        gives scattered non-zero thicknesses and a much brighter bed echo.
+        """
+        return self.h_surf == self.h_bed
+
+    def ice_mask(self, min_thickness_m: float = 25.0) -> np.ndarray:
+        """
+        True where there is real ice, i.e. a measured thickness above the floor.
+
+        Past the calving front the surface and bottom picks collapse onto the
+        same reflector, so thickness falls to a few metres or goes negative.
+        Those samples are open water, not thin ice, and must be kept out of any
+        flotation reasoning: with H ~ 0 the flotation residual reduces to the
+        water surface height, which reads as "near flotation" for free.
+        """
+        return np.isfinite(self.thickness) & (self.thickness >= min_thickness_m)
+
+    def terminus_crossings_km(self, min_thickness_m: float = 25.0,
+                              min_open_km: float = 1.0) -> list:
+        """
+        Along-track distances where ice meets open water.
+
+        A crossing needs measured water, not missing data, on one side: NaN
+        thickness is unknown rather than open, so a bed-pick gap is not a
+        terminus. Returns the ice-side x of each boundary.
+        """
+        ice = self.ice_mask(min_thickness_m)
+        water = np.isfinite(self.thickness) & ~ice & ~self.degenerate_pick
+
+        crossings = []
+        for start, stop in _mask_runs(water):
+            if self.x[stop] - self.x[start] < min_open_km:
+                continue
+            if start > 0 and ice[start - 1]:
+                crossings.append(float(self.x[start - 1]))
+            if stop < self.n - 1 and ice[stop + 1]:
+                crossings.append(float(self.x[stop + 1]))
+        return sorted(crossings)
 
     def nan_blocks(self, min_width_km: float = 0.3) -> list:
         """Contiguous runs of missing bed power wider than min_width_km."""
@@ -336,7 +407,9 @@ class GlacierProfile:
         if len(stac_items) == 0:
             raise ValueError(f"no frames found for {collection}/{segment}")
 
-        x_elev, h_surf, h_bed, lat_e, lon_e = _load_elevations(opr, stac_items)
+        x_elev, h_surf, h_bed, x_track, lat_t, lon_t = _load_elevations(
+            opr, stac_items
+        )
         x_amp, amp = _load_bed_power(opr, stac_items, resample_interval)
 
         if dx_km is None:
@@ -349,14 +422,17 @@ class GlacierProfile:
         x = np.arange(lo, hi + dx_km, dx_km)
         x = x[x <= hi]
 
-        lat = np.interp(x, x_elev, lat_e)
-        lon = np.interp(x, x_elev, lon_e)
+        # From the coordinate track, not the pick-filtered grid, so the path
+        # follows the aircraft through stretches with no layer pick.
+        lat = np.interp(x, x_track, lat_t)
+        lon = np.interp(x, x_track, lon_t)
 
+        gap_tol_km = 2.0 * dx_km
         return cls(
             x=x,
-            amp=_regrid_preserving_gaps(x_amp, amp, x, gap_tol_km=2.0 * dx_km),
-            h_surf=np.interp(x, x_elev, h_surf),
-            h_bed=np.interp(x, x_elev, h_bed),
+            amp=_regrid_preserving_gaps(x_amp, amp, x, gap_tol_km=gap_tol_km),
+            h_surf=_regrid_preserving_gaps(x_elev, h_surf, x, gap_tol_km),
+            h_bed=_regrid_preserving_gaps(x_elev, h_bed, x, gap_tol_km),
             constants=constants,
             geoid_separation_m=resolve_geoid(lat, lon, geoid),
             lat=lat,
@@ -368,8 +444,29 @@ class GlacierProfile:
 
 
 # -- helpers --------------------------------------------------------------
+def _mask_runs(mask: np.ndarray) -> list:
+    """Contiguous True runs as (start, stop) inclusive index pairs."""
+    if not mask.any():
+        return []
+    edges = np.diff(mask.astype(int))
+    starts = list(np.where(edges == 1)[0] + 1)
+    stops = list(np.where(edges == -1)[0])
+    if mask[0]:
+        starts = [0] + starts
+    if mask[-1]:
+        stops = stops + [len(mask) - 1]
+    return list(zip(starts, stops))
+
+
 def _load_elevations(opr, stac_items):
-    """Surface and bed WGS84 elevation against along-track distance in km."""
+    """
+    Surface and bed WGS84 elevation against along-track distance in km.
+
+    Returns the elevations on their own valid-pick grid plus a separate
+    coordinate track. The two are filtered differently on purpose: a stretch
+    with no layer pick still has a real flight path, so dropping those samples
+    from lat/lon would let the interpolation cut the corner.
+    """
     flight_line = xopr.merge_frames(opr.load_frames(stac_items))
     flight_line = xopr.radar_util.add_along_track(flight_line)
 
@@ -400,9 +497,12 @@ def _load_elevations(opr, stac_items):
     order = np.argsort(x_km)
     x_km, h_surf, h_bed = x_km[order], h_surf[order], h_bed[order]
     lat_v, lon_v = lat_v[order], lon_v[order]
-    keep = np.isfinite(x_km) & np.isfinite(h_surf) & np.isfinite(h_bed)
-    keep &= np.concatenate([[True], np.diff(x_km) > 0])
-    return x_km[keep], h_surf[keep], h_bed[keep], lat_v[keep], lon_v[keep]
+
+    unique = np.concatenate([[True], np.diff(x_km) > 0])
+    track = np.isfinite(x_km) & np.isfinite(lat_v) & np.isfinite(lon_v) & unique
+    keep = np.isfinite(x_km) & np.isfinite(h_surf) & np.isfinite(h_bed) & unique
+    return (x_km[keep], h_surf[keep], h_bed[keep],
+            x_km[track], lat_v[track], lon_v[track])
 
 
 def _load_bed_power(opr, stac_items, resample_interval="2s"):

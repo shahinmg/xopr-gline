@@ -1,5 +1,6 @@
 """
 Features computed from a GlacierProfile
+
 """
 
 from abc import ABC, abstractmethod
