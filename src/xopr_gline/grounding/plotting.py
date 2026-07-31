@@ -77,11 +77,10 @@ def plot_detection(profile: GlacierProfile,
     Four panels: geometry, the flotation residual that set the window, bed
     power, and the posterior.
 
-    bathymetry gives the seabed under the floating ice, where radar stops at the
-    ice bottom: a path to BedMachine to sample 'bed' along the flight line, or
-    an array of elevations on the profile's grid. Without it the seabed is drawn
-    flat at its depth at the grounding point. Either way the radar picks are
-    untouched; this only sets the projected bed line.
+    bathymetry draws the seabed under floating ice, where radar stops at the ice
+    bottom: a BedMachine path to sample 'bed' along the line, or an array on the
+    profile's grid. Without it the seabed is drawn flat, and either way the
+    radar picks are untouched.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -389,9 +388,8 @@ def _resolve_bathymetry(profile, spec):
     """
     Seabed elevations on the profile's grid, in its ellipsoidal datum.
 
-    A path is read as BedMachine and sampled along the flight line. Its bed sits
-    on the geoid, so the profile's geoid separation is added to bring it onto
-    the ellipsoid with the radar picks, which are left alone.
+    A path is sampled from BedMachine, whose bed sits on the geoid, so the
+    geoid separation is added to bring it onto the ellipsoid with the picks.
     """
     if spec is None:
         return None

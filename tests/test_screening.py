@@ -63,10 +63,8 @@ def test_short_puddles_are_ignored():
 
 def test_flotation_window_is_cut_at_the_terminus():
     """
-    The window must not run past the calving front. Thickness tapers to the
-    grounding transition and then collapses to open water; without the clamp
-    the window would extend over the water and hand the detectors an ice/water
-    contrast to lock onto.
+    The window must not run past the calving front. Unclamped it would extend
+    over the water and hand the detectors an ice/water contrast to lock onto.
     """
     thickness = np.concatenate([
         np.linspace(900, 400, 30),     # grounded, well above flotation

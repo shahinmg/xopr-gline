@@ -242,11 +242,9 @@ class GlacierProfile:
         threshold_m on the smoothed residual, matching the >30 m "grounded"
         classification the CSV-era script used for plotting.
 
-        The seaward edge is cut at the terminus: past the calving front there is
-        no ice to ground, and with thickness ~ 0 the residual drops back under
-        the threshold, so an unclamped window hands the detectors open water and
-        invites a changepoint on the ice/water contrast instead of the grounding
-        transition.
+        The seaward edge is cut at the terminus. Past the front the residual
+        drops back under the threshold, so an unclamped window would hand the
+        detectors open water to find a changepoint in.
         """
         sign = self.landward_sign(smooth_km)
         grounded = self.smoothed_residual(smooth_km) > threshold_m
@@ -271,12 +269,9 @@ class GlacierProfile:
         lo = max(float(self.x[0]), x_cross - margin_km)
         hi = min(float(self.x[-1]), x_cross + margin_km)
 
-        # Seaward is decreasing x when x increases landward, and vice versa.
-        # The seaward edge snaps to the terminus rather than merely being capped
-        # by it: the grounding point must lie between the crossing and the
-        # calving front, so stopping a margin short of the front would leave
-        # part of the answer outside the search. Only termini within reach are
-        # used, so a long shelf does not stretch the window to its front.
+        # The seaward edge snaps to the terminus rather than being capped by it:
+        # the grounding point must lie between the crossing and the front. Only
+        # termini within reach count, so a long shelf cannot stretch the window.
         reach = 2.0 * margin_km
         for terminus in self.terminus_crossings_km(min_thickness_m):
             if abs(terminus - x_cross) > reach:
@@ -300,12 +295,9 @@ class GlacierProfile:
         """
         True where the bottom pick sits exactly on the surface pick.
 
-        That is the layer picker finding no bottom return and defaulting to the
-        surface, not a measurement of zero-thickness ice. It has to be told
-        apart from open water, which also has thickness near zero: on Petermann
-        69 of 70 samples inboard of 20 km are exactly zero with bed power 8 dB
-        *dimmer* than the shelf, whereas Helheim's real calving front gives
-        scattered non-zero thicknesses and a 73 dB brightening off the water.
+        That is the picker finding no bottom return and defaulting to the
+        surface, not zero-thickness ice. Open water also reads near zero but
+        gives scattered non-zero thicknesses and a much brighter bed echo.
         """
         return self.h_surf == self.h_bed
 

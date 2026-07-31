@@ -21,8 +21,7 @@ uv run python notebooks/run_grounding.py \
 
 This reproduces `data/figs/helheim_geoid_original_20250728.png`, the
 pre-refactor figure: shelf, calving front, and the changepoint 1.3 km inboard
-of it. Along-track km differ by the 16 km the old origin sat further seaward,
-so its changepoint at 56.01 km is this one at 72.74 km.
+of it.
 
 Frames 004-005 are the two that hold the grounding zone. `--frames :5` is the
 subset used in `helheim_example_20080730_01_005.ipynb` and gives the same
@@ -30,15 +29,10 @@ picture with the origin 101 km further back. `--frames=-2:` is *not* the
 grounding zone: the last two frames of this segment are 015-016, out over the
 fjord, where the median thickness is 14 m.
 
-`--crop_lo 62` drops the inland leg, whose 14 km bed-power gap and 1200 m
-flotation residual otherwise squash the panels. It does not move the window:
-the flotation crossing is at 70.57 km either way.
+`--crop_lo 62` drops the inland leg due to large amount of missing data.
 
 `--no_onset` is required. Helheim calves at its grounding zone, so no floating
-ice sits downflow of the window for a bed-power baseline. The old figure did
-print an onset at 57.10 km, but its baseline of -64.7 dB came from open water
-past the calving front, 45 dB brighter than the shelf it was meant to measure.
-The changepoint is the grounding point on this glacier.
+ice sits downflow of the window for a bed-power baseline. 
 
 ## Petermann, 20100420_03
 

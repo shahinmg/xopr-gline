@@ -18,23 +18,11 @@ def sample_bedmachine(lat, lon,
                       path: Union[str, Path, None] = None,
                       crs: str = BEDMACHINE_CRS) -> np.ndarray:
     """
-    A BedMachine variable at each lat/lon, in m.
+    A BedMachine variable at each lat/lon in m, nearest-neighbour on its 150 m grid.
 
-    Nearest-neighbour on BedMachine's 150 m grid. Note the datums differ:
-    'geoid' is height above the WGS84 ellipsoid, while 'bed' and 'surface' are
-    heights above that geoid, so adding the geoid puts them on the ellipsoid
-    with xOPR's elevations.
-
-    Parameters
-    ----------
-    lat, lon: array-like
-        Point coordinates in degrees.
-
-    variable: str
-        Variable to sample, e.g. 'geoid' or 'bed'.
-
-    path: str or Path or None
-        BedMachine NetCDF. Defaults to data/bedmachine/BedMachineGreenland-v5.nc.
+    Datums differ: 'geoid' is height above the WGS84 ellipsoid, while 'bed' and
+    'surface' are heights above that geoid, so adding the geoid puts them on
+    the ellipsoid with xOPR's elevations.
     """
     return _sample(lat, lon, variable, path, crs)
 
