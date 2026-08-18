@@ -16,6 +16,7 @@ from .flow import select_flotation_leg as select_flotation_leg
 from .flow import signed_cos as signed_cos
 from .geoid import sample_geoid as sample_geoid
 from .features import FilterSpec as FilterSpec
+from .profile import FrameSpan as FrameSpan
 from .profile import GlacierProfile as GlacierProfile
 from .profile import ProfileSource as ProfileSource
 from .result import DetectionResult as DetectionResult

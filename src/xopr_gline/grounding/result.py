@@ -38,6 +38,10 @@ class DetectionResult:
 
     extra: dict
         Per-detector diagnostics, e.g. individual model MAPs.
+
+    lat, lon: float
+        The grounding point itself, interpolated on the profile track. NaN for
+        profiles carrying no coordinates.
     """
 
     map_km: float
@@ -47,6 +51,32 @@ class DetectionResult:
     source: Optional[ProfileSource] = None
     search_window: Optional[tuple] = None
     extra: dict = field(default_factory=dict)
+    lat: float = np.nan
+    lon: float = np.nan
+
+    @classmethod
+    def at(cls, profile, map_km: float, **kwargs) -> "DetectionResult":
+        """
+        Build a result at a position on `profile`, filling in its provenance.
+
+        Detectors should use this rather than the constructor so the point
+        geometry cannot drift out of step with map_km.
+        """
+        lat, lon = profile.position_at(map_km)
+        return cls(map_km=float(map_km), source=profile.source,
+                   lat=lat, lon=lon, **kwargs)
+
+    @property
+    def frame(self):
+        """The FrameSpan the grounding point falls in, or None."""
+        return None if self.source is None else self.source.frame_at_km(self.map_km)
+
+    @property
+    def frames_used(self) -> tuple:
+        """Frames overlapping the search window."""
+        if self.source is None or self.search_window is None:
+            return ()
+        return self.source.frames_between(*self.search_window)
 
     def credible_interval(self, mass: float = 0.68) -> tuple:
         """Central interval containing `mass` of the posterior."""

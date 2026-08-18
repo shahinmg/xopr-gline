@@ -37,6 +37,12 @@ def extract_layer_peak_power(radar_ds, layer_twtt, margin_twtt):
     # Extract the data within the specified TWTT range
     data_within_margin = radar_ds.where((radar_ds.twtt >= start_twtt) & (radar_ds.twtt <= end_twtt), drop=True)
 
+    if data_within_margin.sizes.get('twtt', 0) == 0:
+        raise ValueError(
+            "no radar samples fall within the layer margin; the layer picks "
+            "and the twtt axis do not overlap for this frame"
+        )
+
     power_dB = 10 * np.log10(np.abs(data_within_margin.Data))
 
     # Find the twtt index corresponding to the peak power

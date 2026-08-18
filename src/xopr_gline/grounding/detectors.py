@@ -123,12 +123,11 @@ class BOCPDDetector(Detector):
         combined = uniform_filter1d(combined, size=self.smooth_size)
         combined = combined / combined.sum()
 
-        return DetectionResult(
-            map_km=float(x_cp[np.argmax(combined)]),
+        return DetectionResult.at(
+            profile, float(x_cp[np.argmax(combined)]),
             x_km=x_cp,
             posterior=combined,
             detector=f"{self.name}{'-normalised' if self.normalise else ''}",
-            source=profile.source,
             search_window=(lo, hi),
             extra={
                 "model_maps": {
@@ -217,12 +216,11 @@ class OnsetDetector(Detector):
                 f"the window"
             )
 
-        return DetectionResult(
-            map_km=float(profile.x[onset_idx]),
+        return DetectionResult.at(
+            profile, float(profile.x[onset_idx]),
             x_km=profile.x,
             posterior=None,
             detector=self.name,
-            source=profile.source,
             search_window=(lo, hi),
             extra={
                 "baseline_dB": baseline,
@@ -258,12 +256,11 @@ class GradientDetector(Detector):
             dA[:self.trim] = np.nan
             dA[-self.trim:] = np.nan
         idx = int(np.nanargmax(np.abs(dA)))
-        return DetectionResult(
-            map_km=float(x_win[idx]),
+        return DetectionResult.at(
+            profile, float(x_win[idx]),
             x_km=x_win,
             posterior=None,
             detector=self.name,
-            source=profile.source,
             search_window=(lo, hi),
             extra={"peak_gradient": float(dA[idx])},
         )

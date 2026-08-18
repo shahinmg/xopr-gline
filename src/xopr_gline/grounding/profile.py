@@ -7,8 +7,8 @@ arrive from xOPR on different slow_time grids; the constructors join them and
 resample onto one uniform grid so downstream code never interpolates again.
 """
 
-from dataclasses import dataclass, field
-from typing import Optional, Union
+from dataclasses import dataclass, field, replace
+from typing import Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
@@ -25,13 +25,58 @@ from .geoid import resolve_geoid
 
 
 @dataclass(frozen=True)
+class FrameSpan:
+    """One frame's identity and the along-track km it covers on this profile."""
+
+    granule: Optional[str] = None
+    frame: Optional[int] = None
+    lo_km: float = np.nan
+    hi_km: float = np.nan
+    start_time: Optional[pd.Timestamp] = None
+    end_time: Optional[pd.Timestamp] = None
+
+    def contains(self, x_km: float) -> bool:
+        return bool(self.lo_km <= x_km <= self.hi_km)
+
+    def __str__(self) -> str:
+        return f"{self.granule} [{self.lo_km:.2f}-{self.hi_km:.2f} km]"
+
+
+@dataclass(frozen=True)
 class ProfileSource:
-    """Where a profile came from, so a result can be traced back."""
+    """
+    Where a profile came from, so a result can be traced back.
+
+    `frames` carries each frame's along-track extent on the same axis as
+    GlacierProfile.x, which is what turns a detected km into a named frame.
+    """
 
     collection: Optional[str] = None
     segment: Optional[str] = None
-    n_frames: Optional[int] = None
+    frames: tuple = ()
     xopr_version: str = field(default_factory=lambda: xopr.__version__)
+
+    @property
+    def n_frames(self) -> int:
+        return len(self.frames)
+
+    @property
+    def date(self) -> Optional[pd.Timestamp]:
+        """Acquisition start of the earliest frame, or None if untimed."""
+        times = [f.start_time for f in self.frames if f.start_time is not None]
+        return min(times) if times else None
+
+    def frame_at_km(self, x_km: float) -> Optional[FrameSpan]:
+        """The frame covering this along-track position, or None if outside."""
+        for span in self.frames:
+            if span.contains(x_km):
+                return span
+        return None
+
+    def frames_between(self, lo_km: float, hi_km: float) -> tuple:
+        """Frames overlapping [lo_km, hi_km], i.e. the frames a detector saw."""
+        return tuple(s for s in self.frames
+                     if s.hi_km >= lo_km and s.lo_km <= hi_km)
 
     def __str__(self) -> str:
         return f"{self.collection}/{self.segment} ({self.n_frames} frames)"
@@ -121,6 +166,18 @@ class GlacierProfile:
     def nan_mask(self) -> np.ndarray:
         """True where the bed power has no pick."""
         return np.isnan(self.amp)
+
+    def position_at(self, x_km: float) -> tuple:
+        """
+        (lat, lon) at an along-track position, NaN if the profile has no track.
+
+        Interpolated on the profile grid, so a detected km becomes a point that
+        can go straight into a geodataframe.
+        """
+        if self.lat is None or self.lon is None:
+            return (np.nan, np.nan)
+        return (float(np.interp(x_km, self.x, self.lat)),
+                float(np.interp(x_km, self.x, self.lon)))
 
     def cutoff_to_wn(self, wavelength_km: float) -> float:
         """
@@ -313,6 +370,24 @@ class GlacierProfile:
         """
         return np.isfinite(self.thickness) & (self.thickness >= min_thickness_m)
 
+    def open_water(self, min_thickness_m: float = 25.0,
+                   min_run_km: float = 1.0) -> np.ndarray:
+        """
+        True where the profile is over water rather than ice.
+
+        Sub-threshold thickness is water unless the picker merely defaulted the
+        bottom onto the surface. That defaulting does count as water once it
+        persists past min_run_km, which no picker glitch does: Petermann opens
+        with 19.5 km of it at sea level with no bed return at all.
+        """
+        thin = np.isfinite(self.thickness) & ~self.ice_mask(min_thickness_m)
+        degenerate = self.degenerate_pick
+        sustained = np.zeros(self.n, dtype=bool)
+        for start, stop in _mask_runs(degenerate):
+            if self.x[stop] - self.x[start] >= min_run_km:
+                sustained[start:stop + 1] = True
+        return thin & (~degenerate | sustained)
+
     def terminus_crossings_km(self, min_thickness_m: float = 25.0,
                               min_open_km: float = 1.0) -> list:
         """
@@ -323,7 +398,7 @@ class GlacierProfile:
         terminus. Returns the ice-side x of each boundary.
         """
         ice = self.ice_mask(min_thickness_m)
-        water = np.isfinite(self.thickness) & ~ice & ~self.degenerate_pick
+        water = self.open_water(min_thickness_m, min_open_km)
 
         crossings = []
         for start, stop in _mask_runs(water):
@@ -371,6 +446,7 @@ class GlacierProfile:
     def from_xopr(cls, collection: str, segment: str,
                   opr: Optional[xopr.opr_access.OPRConnection] = None,
                   frame_slice: Optional[slice] = None,
+                  frames: Optional[Sequence[int]] = None,
                   dx_km: Optional[float] = None,
                   resample_interval: str = "2s",
                   geoid: Union[float, str, None] = None,
@@ -388,7 +464,12 @@ class GlacierProfile:
             Reused if given, otherwise a default connection is created.
 
         frame_slice: slice or None
-            Subset of the segment's frames. None uses the whole segment.
+            Positional subset of the segment's frames, after sorting by frame
+            number. None uses the whole segment.
+
+        frames: sequence of int or None
+            Frame numbers to keep, e.g. [4, 5]. Takes precedence over
+            frame_slice and is the safe choice when the numbers are known.
 
         dx_km: float or None
             Grid spacing. None uses the median bed-power sample spacing, which
@@ -402,12 +483,19 @@ class GlacierProfile:
         stac_items = opr.query_frames(
             collections=[collection], segment_paths=[segment]
         )
-        if frame_slice is not None:
+        stac_items = _sort_by_frame(stac_items)
+        if frames is not None:
+            wanted = set(int(f) for f in frames)
+            stac_items = stac_items.iloc[
+                [i for i, p in enumerate(stac_items["properties"])
+                 if _frame_number(p) in wanted]
+            ]
+        elif frame_slice is not None:
             stac_items = stac_items.iloc[frame_slice]
         if len(stac_items) == 0:
             raise ValueError(f"no frames found for {collection}/{segment}")
 
-        x_elev, h_surf, h_bed, x_track, lat_t, lon_t = _load_elevations(
+        x_elev, h_surf, h_bed, x_track, lat_t, lon_t, spans = _load_elevations(
             opr, stac_items
         )
         x_amp, amp = _load_bed_power(opr, stac_items, resample_interval)
@@ -438,12 +526,30 @@ class GlacierProfile:
             lat=lat,
             lon=lon,
             source=ProfileSource(
-                collection=collection, segment=segment, n_frames=len(stac_items)
+                collection=collection, segment=segment, frames=spans
             ),
         )
 
 
 # -- helpers --------------------------------------------------------------
+def _frame_number(properties) -> Optional[int]:
+    """Frame number from a STAC item's properties, or None if absent."""
+    return properties.get("opr:frame") if isinstance(properties, dict) else None
+
+
+def _sort_by_frame(stac_items):
+    """
+    Put catalog items in frame order.
+
+    The STAC query makes no ordering promise, and frame_slice is positional, so
+    an unsorted return would silently select the wrong frames.
+    """
+    nums = [_frame_number(p) for p in stac_items["properties"]]
+    if any(n is None for n in nums):
+        return stac_items
+    return stac_items.iloc[np.argsort(nums, kind="stable")]
+
+
 def _mask_runs(mask: np.ndarray) -> list:
     """Contiguous True runs as (start, stop) inclusive index pairs."""
     if not mask.any():
@@ -467,11 +573,17 @@ def _load_elevations(opr, stac_items):
     with no layer pick still has a real flight path, so dropping those samples
     from lat/lon would let the interpolation cut the corner.
     """
-    flight_line = xopr.merge_frames(opr.load_frames(stac_items))
+    frames = opr.load_frames(stac_items)
+    flight_line = xopr.merge_frames(frames)
+    # Overlapping frames repeat a slow_time, which every later lookup refuses
+    # to align to, so this happens once and before along_track is measured.
+    flight_line = flight_line.drop_duplicates("slow_time")
     flight_line = xopr.radar_util.add_along_track(flight_line)
+    spans = _frame_spans(frames, flight_line)
 
     layers = opr.get_layers(flight_line)
-    if layers is None or "standard:bottom" not in layers:
+    needed = ("standard:surface", "standard:bottom")
+    if layers is None or any(name not in layers for name in needed):
         raise ValueError("segment has no surface/bottom layer picks")
 
     surface = layers["standard:surface"]
@@ -489,9 +601,13 @@ def _load_elevations(opr, stac_items):
     lat = flight_line["Latitude"].reindex(slow_time=target, method="nearest")
     lon = flight_line["Longitude"].reindex(slow_time=target, method="nearest")
 
+    # The bottom is picked on a subset of the surface's slow_time, so it is
+    # aligned onto that grid exactly: an unpicked sample stays NaN rather than
+    # borrowing its neighbour's depth.
     x_km = along_track.values / 1000.0
     h_surf = converted["standard:surface"]["wgs84"].values
-    h_bed = converted["standard:bottom"]["wgs84"].values
+    h_bed = converted["standard:bottom"]["wgs84"].reindex(
+        slow_time=target).values
     lat_v, lon_v = lat.values, lon.values
 
     order = np.argsort(x_km)
@@ -502,20 +618,73 @@ def _load_elevations(opr, stac_items):
     track = np.isfinite(x_km) & np.isfinite(lat_v) & np.isfinite(lon_v) & unique
     keep = np.isfinite(x_km) & np.isfinite(h_surf) & np.isfinite(h_bed) & unique
     return (x_km[keep], h_surf[keep], h_bed[keep],
-            x_km[track], lat_v[track], lon_v[track])
+            x_km[track], lat_v[track], lon_v[track], spans)
+
+
+def _frame_spans(frames, flight_line) -> tuple:
+    """
+    Locate each loaded frame on the merged along-track axis, in km.
+
+    Done before the pick filtering so every frame is represented, including
+    ones with no layer picks at all.
+    """
+    along_track = flight_line["along_track"]
+    spans = []
+    for f in frames:
+        t = np.asarray(f["slow_time"].values)
+        if t.size == 0:
+            continue
+        edges = along_track.sel(slow_time=[t.min(), t.max()],
+                                method="nearest").values / 1000.0
+        timed = np.issubdtype(t.dtype, np.datetime64)
+        spans.append(FrameSpan(
+            granule=f.attrs.get("granule"),
+            frame=f.attrs.get("frame"),
+            lo_km=float(np.min(edges)),
+            hi_km=float(np.max(edges)),
+            start_time=pd.Timestamp(t.min()) if timed else None,
+            end_time=pd.Timestamp(t.max()) if timed else None,
+        ))
+    return _close_seams(sorted(spans, key=lambda s: s.lo_km))
+
+
+def _close_seams(spans, max_gap_km: float = 1.0) -> tuple:
+    """
+    Extend each frame up to the next so lookups never fall between frames.
+
+    Consecutive frames leave a one-sample seam. Gaps wider than max_gap_km are
+    a genuinely missing frame and are left alone.
+    """
+    closed = []
+    for span, nxt in zip(spans, list(spans[1:]) + [None]):
+        if nxt is not None and 0 < nxt.lo_km - span.hi_km <= max_gap_km:
+            span = replace(span, hi_km=nxt.lo_km)
+        closed.append(span)
+    return tuple(closed)
 
 
 def _load_bed_power(opr, stac_items, resample_interval="2s"):
-    """Bed echo power in dB against along-track distance in km."""
-    frames = []
+    """
+    Bed echo power in dB against along-track distance in km.
+
+    A frame whose repick finds no samples in the layer margin is dropped rather
+    than taking the whole segment with it; the gap it leaves survives the
+    regrid as NaN.
+    """
+    frames, failed = [], []
     for i in range(len(stac_items)):
-        reflectivity = surface_bed_reflection_power(
-            stac_items.iloc[i], opr=opr, resample_interval=resample_interval
-        )
+        try:
+            reflectivity = surface_bed_reflection_power(
+                stac_items.iloc[i], opr=opr, resample_interval=resample_interval
+            )
+        except Exception as exc:
+            failed.append(f"{type(exc).__name__}: {exc}")
+            continue
         if reflectivity is not None:
             frames.append(reflectivity)
     if not frames:
-        raise ValueError("no frames yielded bed power")
+        detail = f"; {failed[0]}" if failed else ""
+        raise ValueError(f"no frames yielded bed power{detail}")
 
     # Not merge_frames: surface_bed_reflection_power drops the granule
     # attribute that merge_frames parses.

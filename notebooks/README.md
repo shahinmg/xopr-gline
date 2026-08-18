@@ -48,6 +48,32 @@ uv run python notebooks/run_grounding.py \
 
 `--gz_lo/--gz_hi` are the InSAR grounding zone.
 
+## Greenland sweep
+
+```bash
+uv run python notebooks/run_sweep.py --workers 10 --out data/sweeps/greenland.jsonl
+```
+
+Runs every vetted flight line in
+`data/flight_lines/cresis_useable_flight_lines.gpkg` and writes a geopackage of
+grounding points beside the JSONL.
+
+The unit of work is a *run*, not a segment: a contiguous cluster of vetted
+frames padded by `--pad_frames`. One segment can cross several glaciers
+(`19970528_01` has frames 6-7, 12-14 and 20), so clusters more than a frame
+apart become separate runs. That also cuts the download from 3693 frames to
+724.
+
+Every run produces a row carrying a `status`, so failures are a column to
+filter on rather than a crash: `ok`, `screened_out`, `no_profile`, `no_leg`,
+`no_window`, `no_detection`, `not_in_catalog`. Rows are appended as they finish
+and reruns skip what is already there, so an interrupted sweep resumes.
+
+`--margin_km` is the one setting worth thinking about. The window is the
+flotation crossing +/- that much, and the answer moves with it: Helheim gives
+94.90 km at 5 km and 85.94 km at 12, Petermann 98.24 km at 5 and 95.67 km at 12
+(the InSAR GZ is 95.38-97.89). Every row records the window it used.
+
 ## Notes
 
 - `--geoid` takes a number in m or a path to BedMachine, which is sampled
@@ -66,6 +92,9 @@ uv run python notebooks/run_grounding.py \
   The raw run is the headline result.
 - `--no_onset` drops the onset detector, for transects with no shelf downflow
   of the window. Without it those runs stop with "floating reference is 0.0 km".
+- `frames`, `position` and `frames searched` are the provenance a geodataframe
+  row needs: the granules loaded, the grounding point's lat/lon, and which
+  frames the search window touched.
 - Along-track km are relative to the start of the frame slice, so they only
   mean anything alongside the `--frames` used.
 - `data/**` is gitignored; figures written there stay local.

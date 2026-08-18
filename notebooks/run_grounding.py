@@ -123,6 +123,11 @@ def main():
     print(f"\n{profile.source}")
     print(f"  samples       : {profile.n}  dx={profile.dx*1000:.0f} m")
     print(f"  extent        : {profile.extent[0]:.2f} - {profile.extent[1]:.2f} km")
+    if profile.source is not None and profile.source.n_frames:
+        spans = profile.source.frames
+        date = profile.source.date
+        print(f"  frames        : {spans[0].granule} - {spans[-1].granule}"
+              + (f"  {date:%Y-%m-%d}" if date is not None else ""))
     if leg is not None:
         print(f"  along-flow leg: {leg[0]:.2f} - {leg[1]:.2f} km  [auto]")
     g = profile.geoid_separation_m
@@ -168,6 +173,15 @@ def main():
     else:
         print(f"\n  grounding point (changepoint): {changepoint.map_km:.2f} km"
               f"  [onset skipped]")
+
+    headline = onset if onset is not None else changepoint
+    frame = headline.frame
+    print(f"  position                  : {headline.lat:.5f}, {headline.lon:.5f}"
+          + (f"  in {frame.granule}" if frame is not None else ""))
+    used = headline.frames_used
+    if used:
+        print(f"  frames searched           : "
+              f"{', '.join(str(f.frame) for f in used)}")
 
     if args.gz_lo is not None:
         hi = args.gz_hi if args.gz_hi is not None else args.gz_lo
