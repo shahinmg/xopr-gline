@@ -284,24 +284,16 @@ class GlacierProfile:
         """
         return self.smoothed_residual(smooth_km) < threshold_m
 
-    def flotation_window(self, margin_km: float = 12.0,
-                         threshold_m: float = 30.0,
-                         smooth_km: float = 5.0,
-                         min_thickness_m: float = 25.0) -> tuple:
+    def flotation_crossing_km(self, threshold_m: float = 30.0,
+                              smooth_km: float = 5.0) -> float:
         """
-        Search window derived from where the ice becomes grounded.
+        Where the smoothed flotation residual first rises past threshold_m
+        going landward, in km.
 
-        Replaces bounding the search by an InSAR grounding zone, which requires
-        already knowing the answer.
-
-        Floating ice sits near zero residual, not below it, so a sign change is
-        noise rather than signal. This uses the first sustained rise above
-        threshold_m on the smoothed residual, matching the >30 m "grounded"
-        classification the CSV-era script used for plotting.
-
-        The seaward edge is cut at the terminus. Past the front the residual
-        drops back under the threshold, so an unclamped window would hand the
-        detectors open water to find a changepoint in.
+        This is the geometry's own estimate of where grounding begins, derived
+        from elevation alone and independent of anything a detector does with
+        the bed echo. Used both to place the search window and to sanity-check
+        a detector's answer against it.
         """
         sign = self.landward_sign(smooth_km)
         grounded = self.smoothed_residual(smooth_km) > threshold_m
@@ -322,7 +314,29 @@ class GlacierProfile:
         idx = int(np.argmax(grounded))
         if sign < 0:
             idx = len(grounded) - 1 - idx
-        x_cross = float(self.x[idx])
+        return float(self.x[idx])
+
+    def flotation_window(self, margin_km: float = 12.0,
+                         threshold_m: float = 30.0,
+                         smooth_km: float = 5.0,
+                         min_thickness_m: float = 25.0) -> tuple:
+        """
+        Search window derived from where the ice becomes grounded.
+
+        Replaces bounding the search by an InSAR grounding zone, which requires
+        already knowing the answer.
+
+        Floating ice sits near zero residual, not below it, so a sign change is
+        noise rather than signal. This uses the first sustained rise above
+        threshold_m on the smoothed residual, matching the >30 m "grounded"
+        classification the CSV-era script used for plotting.
+
+        The seaward edge is cut at the terminus. Past the front the residual
+        drops back under the threshold, so an unclamped window would hand the
+        detectors open water to find a changepoint in.
+        """
+        sign = self.landward_sign(smooth_km)
+        x_cross = self.flotation_crossing_km(threshold_m, smooth_km)
         lo = max(float(self.x[0]), x_cross - margin_km)
         hi = min(float(self.x[-1]), x_cross + margin_km)
 

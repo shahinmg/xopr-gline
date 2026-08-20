@@ -91,6 +91,21 @@ class DetectionResult:
         return (float(self.x_km[min(lo, n - 1)]),
                 float(self.x_km[min(hi, n - 1)]))
 
+    @property
+    def posterior_entropy(self) -> float:
+        """
+        Shannon entropy of the posterior over its own support, 0 to 1.
+
+        0 is a delta at one sample and 1 is a flat posterior, so a very low
+        value on a wide window means the model is certain, and often certain
+        about a boundary artifact. NaN for point-estimate detectors.
+        """
+        if self.posterior is None or len(self.posterior) < 2:
+            return np.nan
+        p = np.asarray(self.posterior, dtype=float)
+        p = p[p > 0]
+        return float(-(p * np.log(p)).sum() / np.log(len(self.posterior)))
+
     def summary(self) -> str:
         lo68, hi68 = self.credible_interval(0.68)
         lo95, hi95 = self.credible_interval(0.95)

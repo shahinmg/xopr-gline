@@ -5,11 +5,19 @@ Every segment produces exactly one row carrying a status, so a failure is a
 value to filter on rather than an exception that kills the sweep. Rows go to
 JSONL as they finish, which makes a run resumable and lets tuning replay
 without redownloading.
+
+A status of "ok" only means a detector answered. Each row also carries quality
+flags and the settings behind it, and each invocation is recorded in a sibling
+.runs.jsonl, so a point on a map can be traced to the code that produced it.
+Filter on `confidence` before using the geometry; see xopr_gline.validate.
 """
 
 import json
+import platform
 import re
+import subprocess
 import threading
+import uuid
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -19,15 +27,24 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 
+import xopr
 import xopr.opr_access
 
 from .grounding import (BOCPDDetector, GlacierProfile, GradientDetector,
                         OnsetDetector, screen_profile, select_flotation_leg,
                         transition_width_km)
+from .grounding.features import (AMP_CUTOFF_KM, ELEV_CUTOFF_KM, SATURATE_M,
+                                 default_features)
 from .grounding.geoid import DEFAULT_BEDMACHINE
 
 GRANULE = re.compile(r"^(\d{8})_(\d{2})_(\d{3})$")
 USEABLE_LINES = Path("data/flight_lines/cresis_useable_flight_lines.gpkg")
+
+# Pinned rather than derived. Left to itself the grid follows the bed-power
+# sampling of whichever frames a run happens to load, which ran 121-277 m over
+# the first Greenland sweep; every km-denominated setting downstream then means
+# a different number of samples on every run and no two runs are comparable.
+DEFAULT_DX_KM = 0.25
 
 # plot_detection draws through pyplot, which keeps global state.
 _PLOT_LOCK = threading.Lock()
@@ -154,10 +171,16 @@ def run_segment(collection: Optional[str], segment: str,
                 opr: Optional[xopr.opr_access.OPRConnection] = None,
                 geoid=DEFAULT_BEDMACHINE,
                 resample_interval: str = "2s",
+                dx_km: Optional[float] = DEFAULT_DX_KM,
                 margin_km: float = 12.0,
                 auto_leg: bool = True,
                 screen: bool = True,
-                headline: str = "onset",
+                headline: str = "bocpd",
+                pad_km: float = 4.0,
+                snap_to_terminus: bool = False,
+                amp_cutoff_km: float = AMP_CUTOFF_KM,
+                elev_cutoff_km: float = ELEV_CUTOFF_KM,
+                saturate_m: float = SATURATE_M,
                 fig_dir=None,
                 bathymetry=None,
                 **extra) -> dict:
@@ -166,10 +189,17 @@ def run_segment(collection: Optional[str], segment: str,
 
     Never raises: every failure lands in `status` and `reason` so a sweep can
     carry on and the outcome stays visible in the output table.
+
+    Every tuning knob is written back onto the row, so a result can be
+    reproduced from the output alone without knowing what the sweep was
+    invoked with.
     """
     row = {"collection": collection, "segment": segment,
            "frames_requested": _frames_text(frames),
-           "margin_km": margin_km,
+           "margin_km": margin_km, "dx_km": dx_km, "pad_km": pad_km,
+           "headline": headline, "snap_to_terminus": snap_to_terminus,
+           "amp_cutoff_km": amp_cutoff_km, "elev_cutoff_km": elev_cutoff_km,
+           "saturate_m": saturate_m, "resample_interval": resample_interval,
            "status": "error", "reason": "", **extra}
     if not collection or (isinstance(collection, float) and np.isnan(collection)):
         row["status"] = "not_in_catalog"
@@ -179,7 +209,7 @@ def run_segment(collection: Optional[str], segment: str,
     opr = opr or xopr.opr_access.OPRConnection()
     try:
         profile = GlacierProfile.from_xopr(
-            collection, segment, opr=opr, frames=frames,
+            collection, segment, opr=opr, frames=frames, dx_km=dx_km,
             resample_interval=resample_interval, geoid=geoid,
         )
     except Exception as exc:                      # any xOPR or layer failure
@@ -226,11 +256,22 @@ def run_segment(collection: Optional[str], segment: str,
         row["reason"] = _reason(exc)
         return row
     row["window_lo_km"], row["window_hi_km"] = window
+    # The elevation's own estimate of where grounding begins, independent of
+    # anything the bed-echo detectors do. Recorded so a pick sitting on the
+    # seaward clamp can be judged against the geometry after the fact.
+    try:
+        row["flotation_crossing_km"] = profile.flotation_crossing_km()
+    except ValueError:
+        row["flotation_crossing_km"] = np.nan
 
+    features = default_features(amp_cutoff_km, elev_cutoff_km, saturate_m)
+    by_name = {f.name: f for f in features}
     results = {}
-    for name, detector in (("onset", OnsetDetector()),
-                           ("bocpd", BOCPDDetector()),
-                           ("gradient", GradientDetector())):
+    for name, detector in (
+        ("onset", OnsetDetector(feature=by_name["amp"])),
+        ("bocpd", BOCPDDetector(features=features, pad_km=pad_km)),
+        ("gradient", GradientDetector(feature=by_name["dA"])),
+    ):
         try:
             results[name] = detector.detect(profile, window)
         except Exception as exc:
@@ -242,8 +283,20 @@ def run_segment(collection: Optional[str], segment: str,
         row["reason"] = row.get("bocpd_reason", "every detector failed")
         return row
 
-    pick = results.get(headline) or results.get("bocpd") or next(iter(results.values()))
+    # The headline must be one method across the whole output or the geometry
+    # column mixes detectors and the table is not one dataset. A fallback is
+    # still better than no row, but it is recorded rather than silent.
+    pick = results.get(headline)
+    row["headline_fallback"] = pick is None
+    if pick is None:
+        pick = results.get("bocpd") or next(iter(results.values()))
     row.update(_result_fields(pick, results, profile))
+    # Snap first so the confidence knows about it, apply after so it overrides
+    # the position the detector reported.
+    snapped = _snap_to_terminus(pick, profile, snap=snap_to_terminus)
+    row.update(_qc_fields(pick, results, profile,
+                          snapped=snapped["snapped_to_terminus"]))
+    row.update(snapped)
     row["status"] = "ok"
 
     if fig_dir is not None:
@@ -284,6 +337,7 @@ def run_sweep(tasks: Optional[pd.DataFrame] = None,
               resume: bool = True,
               cache_dir: Optional[str] = None,
               progress: bool = True,
+              invocation: Optional[dict] = None,
               **kwargs) -> gpd.GeoDataFrame:
     """
     Run every task in a thread pool and return the rows as a geodataframe.
@@ -291,10 +345,21 @@ def run_sweep(tasks: Optional[pd.DataFrame] = None,
     Work is I/O bound on the xOPR downloads, so threads are enough. Rows are
     appended to `out` as JSONL, and a rerun with resume=True skips segments
     already recorded there.
+
+    Each invocation is recorded in a sibling `.runs.jsonl` and every row is
+    stamped with its sweep_id, so a point in the output can be traced back to
+    the settings and the commit that produced it. See sweep_log().
     """
     tasks = build_tasks() if tasks is None else tasks
     done = _completed(out) if resume else set()
     pending = tasks[~tasks["run_id"].isin(done)]
+
+    sweep_id = uuid.uuid4().hex[:8]
+    started = pd.Timestamp.utcnow()
+    log_run(out, sweep_id=sweep_id, event="start", started=str(started),
+            n_tasks=int(len(pending)), n_skipped=int(len(tasks) - len(pending)),
+            workers=workers, resume=resume, cache_dir=cache_dir,
+            params=dict(kwargs), invocation=invocation)
 
     opr = xopr.opr_access.OPRConnection(cache_dir=cache_dir)
     lock = threading.Lock()
@@ -305,27 +370,82 @@ def run_sweep(tasks: Optional[pd.DataFrame] = None,
             warnings.simplefilter("ignore")
             return run_segment(task.get("collection"), task["segment"],
                                task.get("frames"), opr=opr,
-                               run_id=task["run_id"],
+                               run_id=task["run_id"], sweep_id=sweep_id,
                                date=_iso(task.get("date")), **kwargs)
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(work, t): t["run_id"]
-                   for t in pending.to_dict("records")}
-        for i, future in enumerate(as_completed(futures), 1):
-            row = future.result()
-            rows.append(row)
-            if out is not None:
-                with lock:
-                    with open(out, "a") as fh:
-                        fh.write(json.dumps(row, default=str) + "\n")
-            if progress:
-                print(f"[{i}/{len(futures)}] {row['run_id']:18s} "
-                      f"{row['status']:14s} {row.get('reason', '')[:60]}",
-                      flush=True)
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(work, t): t["run_id"]
+                       for t in pending.to_dict("records")}
+            for i, future in enumerate(as_completed(futures), 1):
+                row = future.result()
+                rows.append(row)
+                if out is not None:
+                    with lock:
+                        with open(out, "a") as fh:
+                            fh.write(json.dumps(row, default=str) + "\n")
+                if progress:
+                    print(f"[{i}/{len(futures)}] {row['run_id']:18s} "
+                          f"{row['status']:14s} {row.get('reason', '')[:60]}",
+                          flush=True)
+    finally:
+        # Logged even on an interrupt, so a partial sweep still leaves a record
+        # of what it was doing.
+        counts = pd.Series([r["status"] for r in rows]).value_counts().to_dict()
+        log_run(out, sweep_id=sweep_id, event="finish",
+                finished=str(pd.Timestamp.utcnow()),
+                duration_s=round((pd.Timestamp.utcnow() - started)
+                                 .total_seconds(), 1),
+                n_completed=len(rows), statuses=counts)
 
     if out is not None and resume:
         rows = _read_jsonl(out)
     return to_geodataframe(pd.DataFrame(rows))
+
+
+# -- run log ---------------------------------------------------------------
+def runs_path(out) -> Optional[Path]:
+    """Where the invocation log for an output file lives."""
+    return None if out is None else Path(out).with_suffix(".runs.jsonl")
+
+
+def log_run(out, **fields) -> Optional[Path]:
+    """
+    Append one record about a sweep invocation.
+
+    Append-only and one line per event, so an interrupted sweep still leaves a
+    start record and a resume adds to the history rather than replacing it.
+    """
+    path = runs_path(out)
+    if path is None:
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {"logged": str(pd.Timestamp.utcnow()), **_environment(), **fields}
+    with open(path, "a") as fh:
+        fh.write(json.dumps(record, default=str) + "\n")
+    return path
+
+
+def sweep_log(out) -> pd.DataFrame:
+    """The invocation history for an output file, newest last."""
+    path = runs_path(out)
+    return pd.DataFrame(_read_jsonl(path) if path else [])
+
+
+def _environment() -> dict:
+    """Code version and host, so a run can be reproduced or explained."""
+    try:
+        sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True,
+                             timeout=5).stdout.strip()
+        dirty = bool(subprocess.run(["git", "status", "--porcelain"],
+                                    capture_output=True, text=True,
+                                    timeout=5).stdout.strip())
+    except Exception:
+        sha, dirty = None, None
+    return {"commit": sha or None, "dirty": dirty,
+            "xopr_version": getattr(xopr, "__version__", None),
+            "host": platform.node()}
 
 
 def forget(out, statuses: Sequence[str] = ("no_profile", "not_in_catalog",
@@ -350,13 +470,56 @@ def forget(out, statuses: Sequence[str] = ("no_profile", "not_in_catalog",
     return len(rows) - len(keep)
 
 
-def to_geodataframe(rows: pd.DataFrame) -> gpd.GeoDataFrame:
-    """Rows as points on the grounding point, in EPSG:4326."""
+def forget_runs(out, run_ids: Sequence[str]) -> int:
+    """
+    Drop these specific runs from the JSONL so a resume redoes them.
+
+    `forget` works by status, which is no help after a fix that changes correct
+    rows rather than failing ones. Returns how many rows were dropped.
+    """
+    out = Path(out)
+    wanted = set(run_ids)
+    rows = _read_jsonl(out)
+    keep = [r for r in rows if r.get("run_id") not in wanted]
+    with open(out, "w") as fh:
+        for row in keep:
+            fh.write(json.dumps(row, default=str) + "\n")
+    return len(rows) - len(keep)
+
+
+def to_geodataframe(rows: pd.DataFrame,
+                    detector: Optional[str] = None) -> gpd.GeoDataFrame:
+    """
+    Rows as points on the grounding point, in EPSG:4326.
+
+    `detector` puts a named detector's own pick in the geometry instead of the
+    reported one, e.g. "bocpd" for the raw changepoint on rows whose reported
+    position was moved onto the terminus. The km column moves with it, so the
+    geometry and `map_km` never disagree.
+    """
     if not len(rows):
         return gpd.GeoDataFrame(rows, geometry=[], crs="EPSG:4326")
+
+    rows = rows.copy()
+    lat_col, lon_col = "lat", "lon"
+    if detector is not None:
+        lat_col, lon_col = f"{detector}_lat", f"{detector}_lon"
+        missing = [c for c in (lat_col, lon_col, f"{detector}_km")
+                   if c not in rows]
+        if missing:
+            raise ValueError(
+                f"no {detector!r} coordinates in these rows (missing "
+                f"{missing}). Sweeps written before per-detector coordinates "
+                f"were recorded only carry the reported position."
+            )
+        rows["map_km"] = rows[f"{detector}_km"]
+        rows["geometry_source"] = detector
+
     blank = pd.Series(np.nan, index=rows.index)
-    lon = pd.to_numeric(rows["lon"] if "lon" in rows else blank, errors="coerce")
-    lat = pd.to_numeric(rows["lat"] if "lat" in rows else blank, errors="coerce")
+    lon = pd.to_numeric(rows[lon_col] if lon_col in rows else blank,
+                        errors="coerce")
+    lat = pd.to_numeric(rows[lat_col] if lat_col in rows else blank,
+                        errors="coerce")
     # Rows that found nothing get a null geometry, not POINT (NaN NaN).
     points = gpd.points_from_xy(lon, lat)
     geometry = gpd.GeoSeries(points, index=rows.index).where(
@@ -408,13 +571,8 @@ def _result_fields(pick, results, profile) -> dict:
     ci68 = pick.credible_interval(0.68)
     ci95 = pick.credible_interval(0.95)
     frame = pick.frame
-    width = np.nan
-    if "onset" in results and "bocpd" in results:
-        try:
-            width = transition_width_km(results["onset"], results["bocpd"],
-                                        profile.landward_sign())
-        except Exception:
-            width = np.nan
+    width = (_transition(results, profile)
+             if "onset" in results and "bocpd" in results else np.nan)
     # Per-model MAPs, because the ensemble can outvote a model that was right:
     # on Helheim ifm lands within 1 km of the manual answer and fullcov 9 km
     # away, and the geometric mean follows fullcov. Their spread flags it.
@@ -423,6 +581,12 @@ def _result_fields(pick, results, profile) -> dict:
         **{f"bocpd_{name}_km": value for name, value in models.items()},
         "bocpd_model_spread_km": (max(models.values()) - min(models.values())
                                   if len(models) > 1 else np.nan),
+        # Each detector's own coordinates, not just the headline's. Without
+        # these the only geometry in the table is whichever pick was promoted,
+        # and any other detector's answer cannot be mapped after the fact.
+        **{f"{name}_{axis}": getattr(result, axis)
+           for name, result in results.items()
+           for axis in ("lat", "lon")},
         "headline_detector": pick.detector,
         "map_km": pick.map_km,
         "lat": pick.lat,
@@ -433,6 +597,147 @@ def _result_fields(pick, results, profile) -> dict:
         "ci95_lo_km": ci95[0], "ci95_hi_km": ci95[1],
         "transition_width_km": width,
     }
+
+
+def _qc_fields(pick, results, profile, snapped: bool = False) -> dict:
+    """
+    Flags that say how much to trust the row, so the output can be filtered.
+
+    The first Greenland sweep had no way to separate a real detection from a
+    boundary artifact, which is what made a table of 99 "ok" rows unusable.
+    """
+    picks = {k: v.map_km for k, v in results.items()}
+    models = (results["bocpd"].extra.get("model_maps", {})
+              if "bocpd" in results else {})
+    ci95 = pick.credible_interval(0.95)
+
+    terminus = profile.terminus_crossings_km()
+    gap = (min(abs(pick.map_km - t) for t in terminus) if terminus else np.nan)
+    # A pick displaced off the terminus by the trim is still a pick at the
+    # terminus, so the tolerance grows to whatever the trim could have moved it.
+    reach = max(2.0 * profile.dx, float(pick.extra.get("edge_reach_km", 0.0)))
+    fields = {
+        "edge_pinned": bool(pick.extra.get("edge_pinned", False)),
+        "at_window_edge": bool(pick.extra.get("at_window_edge", False)),
+        "edge_distance_km": pick.extra.get("edge_distance_km", np.nan),
+        # CLAUDE.md step 3: record when the grounding point is the terminus
+        # rather than sitting somewhere up a floating tongue.
+        "at_terminus": bool(np.isfinite(gap) and gap <= reach),
+        "terminus_gap_km": gap,
+        "detector_spread_km": (max(picks.values()) - min(picks.values())
+                               if len(picks) > 1 else np.nan),
+        "bocpd_model_spread_km": (max(models.values()) - min(models.values())
+                                  if len(models) > 1 else np.nan),
+        "posterior_entropy": pick.posterior_entropy,
+        "ci95_width_km": ci95[1] - ci95[0],
+        "onset_upflow": bool(("onset" in results and "bocpd" in results)
+                             and _transition(results, profile) < 0),
+        "snapped_to_terminus": bool(snapped),
+    }
+    fields["confidence"] = _confidence(fields)
+    return fields
+
+
+def _snap_to_terminus(pick, profile, snap: bool = True,
+                      tolerance_km: float = 0.75,
+                      max_crossing_km: float = 5.0) -> dict:
+    """
+    Report the calving front when that is what the pick is really saying.
+
+    flotation_window clamps the search at the terminus, because the grounding
+    point cannot lie seaward of the front, and the models cannot put their
+    maximum on that clamp: the trim reserves the first few samples. So a
+    tidewater glacier grounded at its front comes back a fixed ~1.75 km inland,
+    on every glacier, which is a bias rather than a measurement.
+
+    A pileup against that clamp is on its own only evidence that the posterior
+    wanted to be at or beyond the seaward limit, not that the ice is afloat
+    there: a changepoint model piles mass at a truncation whether or not a real
+    change lives on it. So the geometry has to agree independently, through the
+    flotation crossing, before the point is moved. Where it does not, the pick
+    is left alone and stays edge_pinned and low confidence, which is the honest
+    reading: the window truncated a transition that lies further inland.
+
+    The detector's own value is kept in raw_map_km, so nothing is lost.
+    """
+    edge = pick.extra.get("pinned_edge")
+    blank = {"snapped_to_terminus": False}
+    if not snap or edge is None:
+        return blank
+
+    edge_km = pick.extra.get("pinned_edge_km", np.nan)
+    crossings = profile.terminus_crossings_km()
+    at_edge = [t for t in crossings if abs(t - edge_km) <= tolerance_km]
+    if not at_edge:
+        return blank
+
+    # The elevation says where grounding begins; only snap where it puts that
+    # near the front too. Measured over the first Greenland sweep, 48 of 54
+    # snapped rows had it within 5 km, and the other 6 up to 12.5 km inland.
+    try:
+        crossing = profile.flotation_crossing_km()
+    except ValueError:
+        return blank
+    if abs(crossing - min(at_edge, key=lambda t: abs(t - edge_km))) > max_crossing_km:
+        return {"snapped_to_terminus": False,
+                "snap_declined_km": float(abs(crossing - edge_km))}
+
+    terminus = min(at_edge, key=lambda t: abs(t - edge_km))
+    lat, lon = profile.position_at(terminus)
+    moved = {
+        "snapped_to_terminus": True,
+        "raw_map_km": pick.map_km,
+        "map_km": float(terminus),
+        "lat": lat,
+        "lon": lon,
+        "terminus_gap_km": 0.0,
+        "at_terminus": True,
+    }
+
+    # The frame is named from the position, so moving the position can move it
+    # across a frame seam. Only matters where the window spans two frames, but
+    # a row naming a frame that does not contain its own point is wrong.
+    source = profile.source
+    if source is not None:
+        span = source.frame_at_km(terminus)
+        if span is not None:
+            moved["frame"] = span.granule
+    return moved
+
+
+def _confidence(qc: dict) -> str:
+    """
+    Three-way verdict from the QC flags, for filtering the output.
+
+    low: an arbitrary boundary or a detector disagreement decided the answer.
+    medium: the detectors agree only loosely, the pick sits at a search limit,
+    or it is the calving front. high: everything agrees within a couple of km
+    away from the edges.
+
+    A snapped row is not "low": the position is the calving front, which is
+    measured, and what is unresolved is only whether a distinct grounding point
+    sits inland of it. That is medium, and it stays low if the detectors also
+    disagree.
+    """
+    spread = np.nanmax([qc["detector_spread_km"],
+                        qc["bocpd_model_spread_km"], 0.0])
+    if spread > 5.0 or qc["onset_upflow"]:
+        return "low"
+    if qc.get("snapped_to_terminus"):
+        return "medium"
+    if qc["edge_pinned"]:
+        return "low"
+    if qc["at_window_edge"] or spread > 2.0:
+        return "medium"
+    return "high"
+
+
+def _transition(results, profile) -> float:
+    try:
+        return transition_width_km(results["onset"], results["bocpd"],
+                                   profile.landward_sign())
+    except Exception:
+        return np.nan
 
 
 def _read_jsonl(path) -> list:
