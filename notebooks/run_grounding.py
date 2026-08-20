@@ -26,6 +26,8 @@ import xopr.opr_access
 from xopr_gline.grounding import (BOCPDDetector, GlacierProfile,
                                   GradientDetector, OnsetDetector,
                                   select_flotation_leg, transition_width_km)
+from xopr_gline.grounding.features import (AMP_CUTOFF_KM, ELEV_CUTOFF_KM,
+                                           SATURATE_M, default_features)
 
 
 def parse_slice(text):
@@ -74,6 +76,16 @@ def main():
     p.add_argument("--gz_hi", type=float, default=None)
     p.add_argument("--normalised", action="store_true",
                    help="also run with standardised features")
+    p.add_argument("--pad_km", type=float, default=4.0,
+                   help="context beyond the window given to BOCPD but not "
+                        "reported on, so an edge transient cannot become the "
+                        "answer. Stops at the calving front. 0 disables")
+    p.add_argument("--amp_cutoff_km", type=float, default=AMP_CUTOFF_KM,
+                   help="low-pass wavelength for the bed power channels")
+    p.add_argument("--elev_cutoff_km", type=float, default=ELEV_CUTOFF_KM,
+                   help="low-pass wavelength for the elevation channels")
+    p.add_argument("--saturate_m", type=float, default=SATURATE_M,
+                   help="tanh scale for the flotation residual channel. 0 off")
     p.add_argument("--cache_dir", default=None)
     p.add_argument("--fig", default=None, help="write a figure to this path")
     p.add_argument("--quiet", action="store_true")
@@ -141,16 +153,24 @@ def main():
     print(f"  bed-power gaps: {len(gaps)}"
           + (f"  {[(round(a,1), round(b,1)) for a, b in gaps[:4]]}" if gaps else ""))
 
+    features = default_features(args.amp_cutoff_km, args.elev_cutoff_km,
+                                args.saturate_m)
+    by_name = {f.name: f for f in features}
+
     onset = None
     if not args.no_onset:
-        onset = OnsetDetector(baseline_km=args.baseline_km,
+        onset = OnsetDetector(feature=by_name["amp"],
+                              baseline_km=args.baseline_km,
                               min_baseline_km=args.min_baseline_km
                               ).detect(profile, window)
-    changepoint = BOCPDDetector().detect(profile, window)
+    changepoint = BOCPDDetector(features, pad_km=args.pad_km).detect(profile,
+                                                                     window)
     results = ([onset] if onset is not None else []) + [
-        changepoint, GradientDetector().detect(profile, window)]
+        changepoint,
+        GradientDetector(feature=by_name["dA"]).detect(profile, window)]
     if args.normalised:
-        results.append(BOCPDDetector(normalise=True).detect(profile, window))
+        results.append(BOCPDDetector(features, pad_km=args.pad_km,
+                                     normalise=True).detect(profile, window))
 
     print()
     for r in results:
@@ -159,6 +179,13 @@ def main():
             per_model = "  ".join(f"{k}={v:.2f}"
                                   for k, v in r.extra["model_maps"].items())
             print(f"    per-model MAP: {per_model}")
+        if r.extra.get("edge_pinned"):
+            print(f"    WARNING edge-pinned: the pick sits "
+                  f"{r.extra['edge_distance_km']:.2f} km from a boundary the "
+                  f"models could not see past, so the trim placed it there")
+        elif r.extra.get("at_window_edge"):
+            print(f"    at the search limit: the change is at or beyond "
+                  f"{r.map_km:.2f} km")
         if r.detector == "onset":
             lo_b, hi_b = r.extra["baseline_extent_km"]
             print(f"    baseline {r.extra['baseline_dB']:.1f} dB "
