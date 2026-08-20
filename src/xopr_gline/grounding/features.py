@@ -53,9 +53,15 @@ class Feature(ABC):
 
 # The CSV-era script specified cutoffs as Butterworth Wn at dx = 0.716 km:
 # AMP_WN 0.15 -> 9.55 km and SLOPE_WN 0.02 -> 71.6 km. Expressed as physical
-# wavelengths they carry over to any sample spacing.
+# wavelengths they carry over to any sample spacing. They are defaults, not
+# constants: 71.6 km is a long smoother on a 140 km profile, so sweep them
+# through default_features() rather than treating them as settled.
 AMP_CUTOFF_KM = 9.55
 ELEV_CUTOFF_KM = 71.6
+
+# Flotation residual beyond this many metres from zero is compressed. See
+# _saturate.
+SATURATE_M = 100.0
 
 
 class AmplitudeLevel(Feature):
@@ -101,18 +107,42 @@ class AmplitudeGradient(Feature):
 
 
 class FlotationResidual(Feature):
-    """h_surf - H*(1 - rho_ice/rho_sw), m. Zero at hydrostatic flotation."""
+    """
+    h_surf_msl - H*(1 - rho_ice/rho_sw), m. Zero at hydrostatic flotation.
+
+    Referenced to sea level like GlacierProfile.flotation_residual: the
+    ellipsoidal surface carries a geoid ramp of tens of metres along track,
+    which the detector would otherwise read as a trend in its primary channel.
+    """
 
     name = "dfree"
 
-    def __init__(self, filt: FilterSpec = FilterSpec(ELEV_CUTOFF_KM)):
+    def __init__(self, filt: FilterSpec = FilterSpec(ELEV_CUTOFF_KM),
+                 saturate_m: float = SATURATE_M):
         self.filt = filt
+        self.saturate_m = saturate_m
 
     def compute(self, profile: GlacierProfile) -> np.ndarray:
-        h_surf = self.filt.apply(profile, profile.h_surf)
-        h_bed = self.filt.apply(profile, profile.h_bed)
+        h_surf = self.filt.apply(profile, profile.h_surf_msl)
+        h_bed = self.filt.apply(profile, profile.h_bed_msl)
         thickness = h_surf - h_bed
-        return h_surf - thickness * profile.constants.flotation_factor
+        residual = h_surf - thickness * profile.constants.flotation_factor
+        return _saturate(residual, self.saturate_m)
+
+
+def _saturate(values: np.ndarray, scale: float) -> np.ndarray:
+    """
+    Compress values far from zero so the inland ramp cannot dominate.
+
+    The flotation residual climbs past 1000 m inland while the grounding
+    transition lives within tens of metres of zero; unsaturated, that ramp sets
+    the covariance and pulls the changepoint onto bed topography. tanh rather
+    than a clip, which leaves zero-variance blocks the covariance models choke
+    on. Pass 0 or None to disable.
+    """
+    if not scale or not np.isfinite(scale):
+        return values
+    return scale * np.tanh(values / scale)
 
 
 class SurfaceSlope(Feature):
@@ -127,12 +157,21 @@ class SurfaceSlope(Feature):
         return np.gradient(self.filt.apply(profile, profile.h_surf), profile.x)
 
 
-DEFAULT_FEATURES = (
-    AmplitudeLevel(),
-    AmplitudeGradient(),
-    FlotationResidual(),
-    SurfaceSlope(),
-)
+def default_features(amp_cutoff_km: float = AMP_CUTOFF_KM,
+                     elev_cutoff_km: float = ELEV_CUTOFF_KM,
+                     saturate_m: float = SATURATE_M) -> tuple:
+    """The default channel set with its filter cutoffs exposed for tuning."""
+    amp = FilterSpec(amp_cutoff_km)
+    elev = FilterSpec(elev_cutoff_km)
+    return (
+        AmplitudeLevel(amp),
+        AmplitudeGradient(amp),
+        FlotationResidual(elev, saturate_m=saturate_m),
+        SurfaceSlope(elev),
+    )
+
+
+DEFAULT_FEATURES = default_features()
 
 
 def stack(profile: GlacierProfile, features=DEFAULT_FEATURES) -> np.ndarray:
