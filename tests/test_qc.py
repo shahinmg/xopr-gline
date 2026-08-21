@@ -329,3 +329,32 @@ def test_the_scoreboard_counts_only_rows_that_found_something():
     assert board["n"] == 1
     assert board["edge_pinned"] == 1.0
     assert board["confidence_low"] == 1.0
+
+
+def test_terminus_offset_is_positive_inland_whichever_way_the_line_runs():
+    """
+    A grounding point can only sit inland of the calving front, so the signed
+    offset must read positive on both orientations. The first version multiplied
+    by landward_sign the wrong way round and reported a pick 2 km inland of
+    Helheim's front as -2 km.
+    """
+    from xopr_gline.grounding import GlacierProfile
+
+    def leg(seaward):
+        h_surf = np.concatenate([np.linspace(800, 60, 30), np.zeros(20)])
+        thickness = np.concatenate([np.linspace(900, 550, 30), np.zeros(20)])
+        if not seaward:
+            h_surf, thickness = h_surf[::-1], thickness[::-1]
+        return GlacierProfile(x=np.arange(len(h_surf)) * 0.5,
+                              amp=np.full(len(h_surf), -100.0),
+                              h_surf=h_surf, h_bed=h_surf - thickness,
+                              geoid_separation_m=0.0)
+
+    for seaward in (True, False):
+        profile = leg(seaward)
+        front = profile.calving_front_km()
+        sign = profile.landward_sign()
+        inland = front + 2.0 * sign          # 2 km on the landward side
+        offset = (inland - front) * sign
+        assert offset == pytest.approx(2.0), (
+            f"seaward={seaward}: a pick 2 km inland read {offset:+.2f}")

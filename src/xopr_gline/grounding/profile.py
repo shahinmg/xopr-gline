@@ -340,17 +340,23 @@ class GlacierProfile:
         lo = max(float(self.x[0]), x_cross - margin_km)
         hi = min(float(self.x[-1]), x_cross + margin_km)
 
-        # The seaward edge snaps to the terminus rather than being capped by it:
-        # the grounding point must lie between the crossing and the front. Only
-        # termini within reach count, so a long shelf cannot stretch the window.
+        # The seaward edge snaps to the calving front rather than being capped
+        # by it: the grounding point must lie between the crossing and the
+        # front. The front, not the nearest crossing: iterating every crossing
+        # let the last assignment win, so on a seaward-running profile a berg
+        # out in the fjord stretched the window past the front and handed the
+        # detector the open water this clamp exists to keep out. Only a front
+        # within reach counts, so a long shelf cannot stretch the window.
         reach = 2.0 * margin_km
-        for terminus in self.terminus_crossings_km(min_thickness_m):
-            if abs(terminus - x_cross) > reach:
-                continue
-            if sign > 0 and terminus <= x_cross:
-                lo = terminus
-            elif sign < 0 and terminus >= x_cross:
-                hi = terminus
+        # Measured from the flotation crossing, not from the landward end: the
+        # front that bounds the search is the first one seaward of where
+        # grounding begins, which is also what makes the sign checks redundant.
+        front = self.calving_front_km(x_cross, min_thickness_m)
+        if front is not None and abs(front - x_cross) <= reach:
+            if sign > 0:
+                lo = front
+            else:
+                hi = front
 
         if not hi > lo:
             raise ValueError(
@@ -423,6 +429,39 @@ class GlacierProfile:
             if stop < self.n - 1 and ice[stop + 1]:
                 crossings.append(float(self.x[stop + 1]))
         return sorted(crossings)
+
+    def calving_front_km(self, from_km: Optional[float] = None,
+                         min_thickness_m: float = 25.0,
+                         min_open_km: float = 1.0) -> Optional[float]:
+        """
+        The glacier's calving front in km, or None if the line never reaches
+        open water.
+
+        The first ice/water crossing met travelling seaward: from `from_km` if
+        given, otherwise from the landward end of the profile. Every later
+        crossing is a berg in the fjord, and a grounding point is measured
+        against the front, not against whichever piece of ice happens to be
+        nearest.
+
+        Which way is seaward comes from the flotation residual, so a profile
+        with no usable residual has no front to report. That returns None
+        rather than raising: callers reach here while screening a segment out,
+        and an unusable profile should stay a verdict rather than become an
+        error.
+        """
+        crossings = self.terminus_crossings_km(min_thickness_m, min_open_km)
+        try:
+            sign = self.landward_sign()
+        except ValueError:
+            return None
+        if from_km is not None:
+            crossings = [t for t in crossings
+                         if (t <= from_km if sign > 0 else t >= from_km)]
+        if not crossings:
+            return None
+        # Seaward is decreasing x when x runs landward, so the front is the
+        # crossing furthest along the landward direction.
+        return max(crossings) if sign > 0 else min(crossings)
 
     def nan_blocks(self, min_width_km: float = 0.3) -> list:
         """Contiguous runs of missing bed power wider than min_width_km."""

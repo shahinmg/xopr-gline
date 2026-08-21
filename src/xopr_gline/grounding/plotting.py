@@ -116,11 +116,19 @@ def plot_detection(profile: GlacierProfile,
                 ax.axvspan(gz[0], gz[1], color=C["gz"], alpha=0.22, zorder=4)
 
         # Calving front from the data, where thickness collapses. Absent on a
-        # transect that never reaches open water, e.g. Petermann 7:11.
+        # transect that never reaches open water, e.g. Petermann 7:11. The
+        # other crossings are bergs in the fjord: drawn, because they explain
+        # the bed power, but faint, because the grounding point is measured
+        # against the front alone.
+        front = profile.calving_front_km()
         termini = [t for t in profile.terminus_crossings_km() if x0 <= t <= x1]
+        bergs = [t for t in termini if front is None or t != front]
         for ax in axs:
-            for terminus in termini:
-                ax.axvline(terminus, color=C["terminus"], lw=1.6, ls="-.",
+            for berg in bergs:
+                ax.axvline(berg, color=C["terminus"], lw=1.0, ls=":",
+                           alpha=0.45, zorder=5)
+            if front is not None and x0 <= front <= x1:
+                ax.axvline(front, color=C["terminus"], lw=1.6, ls="-.",
                            alpha=0.9, zorder=5)
 
         vis = (profile.x >= x0) & (profile.x <= x1)
@@ -195,14 +203,13 @@ def plot_detection(profile: GlacierProfile,
         handles.append(Line2D([], [], color=C["map"], marker="s", lw=1.8,
                               ls="--", mec="white", mew=1.2, ms=8,
                               label=f"changepoint {primary.map_km:.2f} km"))
-        if termini:
-            # Every ice/water crossing in view is drawn, and there can be
-            # several: bergs in the fjord each make one. Naming only the first
-            # left the others unexplained.
-            label = (f"terminus {termini[0]:.2f} km" if len(termini) == 1
-                     else f"ice/water crossings ({len(termini)})")
+        if front is not None and x0 <= front <= x1:
             handles.append(Line2D([], [], color=C["terminus"], lw=1.6, ls="-.",
-                                  label=label))
+                                  label=f"calving front {front:.2f} km"))
+        if bergs:
+            handles.append(Line2D([], [], color=C["terminus"], lw=1.0, ls=":",
+                                  alpha=0.45,
+                                  label=f"berg / other ice ({len(bergs)})"))
         handles.append(Line2D([], [], color="black", lw=0.7, ls="--",
                               label="sea level"))
         ax.set_ylabel("Elevation (m WGS84)")
@@ -689,19 +696,16 @@ def _ahead_of_terminus(profile, ice, gp_km):
     never reaches open water.
     """
     sign = profile.landward_sign()
-    seaward = [t for t in profile.terminus_crossings_km()
-               if (t > gp_km if sign < 0 else t < gp_km)]
-    if seaward:
-        front = min(seaward) if sign < 0 else max(seaward)
-    elif ice.any():
+    front = profile.calving_front_km(gp_km)
+    if front is None:
+        if not ice.any():
+            return np.zeros(len(profile.x), dtype=bool)
         edges = np.flatnonzero(np.diff(np.r_[False, ice, False].astype(np.int8)))
         gp_i = int(np.argmin(np.abs(profile.x - gp_km)))
         start, stop = min(zip(edges[::2], edges[1::2]),
                           key=lambda run: 0 if run[0] <= gp_i < run[1]
                           else min(abs(run[0] - gp_i), abs(run[1] - 1 - gp_i)))
         front = profile.x[start] if sign > 0 else profile.x[stop - 1]
-    else:
-        return np.zeros(len(profile.x), dtype=bool)
     return (profile.x < front) if sign > 0 else (profile.x > front)
 
 

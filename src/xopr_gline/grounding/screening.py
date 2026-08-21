@@ -93,8 +93,10 @@ def screen_profile(profile: GlacierProfile,
     min_hab = float(np.nanmin(np.abs(hab))) if hab.size else np.nan
     crosses = bool(hab.size and np.nanmin(hab) < 0 < np.nanmax(hab))
 
-    crossings = scope.terminus_crossings_km(min_thickness_m)
-    terminus = crossings[-1] if crossings else None
+    # The calving front, not crossings[-1]: that is the highest-x crossing,
+    # which is the front only where x runs landward. On a seaward-running line
+    # it is a berg out in the fjord.
+    terminus = scope.calving_front_km(min_thickness_m=min_thickness_m)
 
     distance = None
     if terminus is not None and leg is not None:

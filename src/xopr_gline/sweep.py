@@ -611,8 +611,16 @@ def _qc_fields(pick, results, profile, snapped: bool = False) -> dict:
               if "bocpd" in results else {})
     ci95 = pick.credible_interval(0.95)
 
-    terminus = profile.terminus_crossings_km()
-    gap = (min(abs(pick.map_km - t) for t in terminus) if terminus else np.nan)
+    # Measured against the calving front, not the nearest ice/water crossing:
+    # bergs in the fjord each make a crossing, and a pick sitting 2 km inland of
+    # the front read as 0.2 km from a berg drifting past it. What is wanted is
+    # the changepoint of upflow ice relative to the terminus.
+    front = profile.calving_front_km()
+    gap = abs(pick.map_km - front) if front is not None else np.nan
+    # Signed, so a pick beyond the front is distinguishable from one inland of
+    # it. Positive is inland, which is the only side a grounding point can be.
+    offset = ((pick.map_km - front) * profile.landward_sign()
+              if front is not None else np.nan)
     # A pick displaced off the terminus by the trim is still a pick at the
     # terminus, so the tolerance grows to whatever the trim could have moved it.
     reach = max(2.0 * profile.dx, float(pick.extra.get("edge_reach_km", 0.0)))
@@ -624,6 +632,8 @@ def _qc_fields(pick, results, profile, snapped: bool = False) -> dict:
         # rather than sitting somewhere up a floating tongue.
         "at_terminus": bool(np.isfinite(gap) and gap <= reach),
         "terminus_gap_km": gap,
+        "calving_front_km": front if front is not None else np.nan,
+        "terminus_offset_km": offset,
         "detector_spread_km": (max(picks.values()) - min(picks.values())
                                if len(picks) > 1 else np.nan),
         "bocpd_model_spread_km": (max(models.values()) - min(models.values())
