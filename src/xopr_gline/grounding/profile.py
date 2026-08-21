@@ -586,6 +586,11 @@ def _load_elevations(opr, stac_items):
     coordinate track. The two are filtered differently on purpose: a stretch
     with no layer pick still has a real flight path, so dropping those samples
     from lat/lon would let the interpolation cut the corner.
+
+    The surface is kept wherever it is picked, even with no bottom under it.
+    Requiring both put a hole in the surface at every bed-pick gap, and the
+    surface is picked on every sample: 20080730_01 has 17550 of them and 3974
+    with no bottom.
     """
     frames = opr.load_frames(stac_items)
     flight_line = xopr.merge_frames(frames)
@@ -630,7 +635,9 @@ def _load_elevations(opr, stac_items):
 
     unique = np.concatenate([[True], np.diff(x_km) > 0])
     track = np.isfinite(x_km) & np.isfinite(lat_v) & np.isfinite(lon_v) & unique
-    keep = np.isfinite(x_km) & np.isfinite(h_surf) & np.isfinite(h_bed) & unique
+    # h_bed keeps its NaNs; _regrid_preserving_gaps drops them on its own, so
+    # the bed comes out of the regrid unchanged and only the surface gains.
+    keep = np.isfinite(x_km) & np.isfinite(h_surf) & unique
     return (x_km[keep], h_surf[keep], h_bed[keep],
             x_km[track], lat_v[track], lon_v[track], spans)
 

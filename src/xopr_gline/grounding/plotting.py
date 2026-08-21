@@ -7,6 +7,7 @@ ice/water/earth layers with black interfaces, GMT frames, legends outside the
 axes, and A/B labels on the section ends.
 """
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -23,6 +24,15 @@ LAYER_C = {"ice": "lightskyblue", "water": "darkblue", "earth": "#c8a165"}
 # Matches GlacierProfile.ice_mask, which the fills cannot use once the picks
 # have been bridged across their gaps.
 _MIN_THICKNESS_M = 25.0
+
+# What the column holds at a sample. _NODATA and _NOBASE are their own states
+# on purpose: a stretch with no pick is unknown, not ocean.
+_NODATA, _GROUNDED, _FLOATING, _WATER, _NOBASE = 0, 1, 2, 3, 4
+
+# Longest bed-pick gap worth interpolating across. 20060608_01 has 8 km of
+# shelf with no bottom pick, and bridging it drew the ice base 80 m above sea
+# level with ocean underneath. A gap this wide is not interpolation.
+_MAX_BRIDGE_KM = 2.5
 
 # Okabe-Ito, colourblind-safe.
 C = {
@@ -121,43 +131,20 @@ def plot_detection(profile: GlacierProfile,
         # The seabed sets the floor along with the picks: BedMachine's trough
         # runs 200 m below Helheim's deepest bed pick and would be clipped off.
         bathy = _resolve_bathymetry(profile, bathymetry)
-        floor = (profile.h_bed[vis] if bathy is None
-                 else np.concatenate([profile.h_bed[vis], bathy[vis]]))
-        _tight_ylim(ax, floor, profile.h_surf[vis])
-        # Gaps in the layer picks are bridged so the section reads continuously,
-        # and the bridges are dashed: interpolated, not measured.
-        surf, surf_gap = _interp_gaps(profile.x, profile.h_surf)
-        bed, bed_gap = _interp_gaps(profile.x, profile.h_bed)
-        gap = surf_gap | bed_gap
+        _tight_ylim(ax, _depth_bound(profile, bathy, vis), profile.h_surf[vis])
+        floor = ax.get_ylim()[0]
         gp = onset.map_km if onset is not None else primary.map_km
-        grounded = ((profile.x >= gp) if profile.landward_sign() > 0
-                    else (profile.x <= gp))
-        # The ice runs to the terminus, but its bottom pick collapses before
-        # then, so the bottom is carried out at the depth it last held.
-        collapsed = _collapsed_bottom(profile, surf, bed, grounded)
-        patched = np.zeros(profile.n, dtype=bool)
-        if collapsed.any():
-            bed, patched = _hold_front_bottom(profile, bed, collapsed)
-            gap = gap | patched
-        ahead = _ahead_of_terminus(profile, _ice_mask(surf, bed), gp)
-        ice = _ice_mask(surf, bed) & ~ahead
+        sec = _build_section(profile, gp, sea_level, bathy, floor,
+                             project_bathymetry)
+        ice = sec.ice
         handles = []
         if fill_layers:
-            # The ice stops at the calving face, so the fill follows the raw
-            # pick up it. The held bottom stays the seabed's business.
-            projected = _fill_section(ax, profile, surf, bed,
-                                      np.where(patched, profile.h_bed, bed),
-                                      ice, ahead, grounded, sea_level, gp,
-                                      project_bathymetry, bathy)
+            _fill_section(ax, profile.x, sec, sea_level, floor)
             handles += [Patch(fc=LAYER_C["ice"], ec="black", lw=0.8, label="Ice"),
                         Patch(fc=LAYER_C["water"], ec="black", lw=0.8,
                               label="Water"),
                         Patch(fc=LAYER_C["earth"], ec="black", lw=0.8,
                               label="Bed")]
-            if projected is not None:
-                source = "BedMachine" if bathymetry is not None else "projected"
-                handles.append(Line2D([], [], color="black", lw=1.2, ls="--",
-                                      label=f"Bed ({source})"))
             surf_c = bed_c = "black"
         else:
             surf_c, bed_c = C["surf"], C["bed"]
@@ -166,23 +153,28 @@ def plot_detection(profile: GlacierProfile,
         # Only where there is glacier ice. Past the calving front the layer
         # picks collapse onto the sea surface, and drawing them there would
         # trace the water rather than the ice this figure is about.
-        ax.plot(profile.x, np.where(ice, profile.h_surf, np.nan), color=surf_c,
-                lw=1.2, zorder=5)
-        ax.plot(profile.x, np.where(ice & ~patched, profile.h_bed, np.nan),
+        ax.plot(profile.x, np.where(~sec.surf_bridged, sec.surf, np.nan),
+                color=surf_c, lw=1.2, zorder=5)
+        ax.plot(profile.x, np.where(~sec.base_bridged, sec.base, np.nan),
                 color=bed_c, lw=1.2, zorder=5)
-        if (gap & ice).any():
-            ax.plot(profile.x, np.where(ice, _bridge(surf, surf_gap), np.nan),
-                    color=surf_c, lw=1.2, ls=(0, (4, 2)), zorder=5)
-            ax.plot(profile.x, np.where(ice, _bridge(bed, bed_gap), np.nan),
-                    color=bed_c, lw=1.2, ls=(0, (4, 2)), zorder=5)
-            # The calving face: the bottom pick climbing to meet the surface. It
-            # is where the picks stop describing an ice bottom, so it is drawn
-            # like the rest of what was not measured.
-            ax.plot(profile.x,
-                    np.where(_dilate(patched) & ice, profile.h_bed, np.nan),
-                    color=bed_c, lw=1.2, ls=(0, (4, 2)), zorder=5)
-            handles.append(Line2D([], [], color=surf_c, lw=1.2, ls=(0, (4, 2)),
+        # Bridged stretches, drawn one sample wide either side so they join the
+        # measured pick rather than floating free of it.
+        for values, bridged, color in ((sec.surf, sec.surf_bridged, surf_c),
+                                       (sec.base, sec.base_bridged, bed_c)):
+            if bridged.any():
+                ax.plot(profile.x, np.where(_dilate(bridged) & ice, values,
+                                            np.nan),
+                        color=color, lw=1.2, ls=(0, (4, 2)), zorder=5)
+        if sec.base_bridged.any() or sec.surf_bridged.any():
+            handles.append(Line2D([], [], color=bed_c, lw=1.2, ls=(0, (4, 2)),
                                   label="Interpolated across gap"))
+        if sec.projected.any():
+            source = "BedMachine" if bathymetry is not None else "projected"
+            handles.append(Line2D([], [], color="black", lw=1.2, ls="--",
+                                  label=f"Seabed ({source})"))
+        if (sec.state == _NODATA).any() or sec.unresolved.any():
+            handles.append(Patch(fc="none", ec=C["muted"], lw=0.6, hatch="///",
+                                 label="no bottom pick"))
         ax.axhline(sea_level, color="black", lw=0.7, ls="--", alpha=0.8,
                    zorder=5)
         ax.axvline(primary.map_km, color=C["map"], lw=1.8, ls="--", alpha=0.9,
@@ -190,24 +182,27 @@ def plot_detection(profile: GlacierProfile,
         if onset is not None:
             ax.axvline(onset.map_km, color=C["onset"], lw=2.2, alpha=0.95,
                        zorder=6)
-            ax.scatter([onset.map_km],
-                       [float(np.interp(onset.map_km, profile.x, profile.h_surf))],
+            ax.scatter([onset.map_km], [_surf_at(profile, sec, onset.map_km)],
                        s=180, color=C["onset"], edgecolors="white", lw=1.8,
                        zorder=7)
             handles.append(Line2D([], [], color=C["onset"], marker="o", lw=2.2,
                                   mec="white", mew=1.4, ms=10,
                                   label=f"grounding point (onset) "
                                         f"{onset.map_km:.2f} km"))
-        ax.scatter([primary.map_km],
-                   [float(np.interp(primary.map_km, profile.x, profile.h_surf))],
+        ax.scatter([primary.map_km], [_surf_at(profile, sec, primary.map_km)],
                    s=120, color=C["map"], marker="s", edgecolors="white", lw=1.6,
                    zorder=7)
         handles.append(Line2D([], [], color=C["map"], marker="s", lw=1.8,
                               ls="--", mec="white", mew=1.2, ms=8,
                               label=f"changepoint {primary.map_km:.2f} km"))
         if termini:
+            # Every ice/water crossing in view is drawn, and there can be
+            # several: bergs in the fjord each make one. Naming only the first
+            # left the others unexplained.
+            label = (f"terminus {termini[0]:.2f} km" if len(termini) == 1
+                     else f"ice/water crossings ({len(termini)})")
             handles.append(Line2D([], [], color=C["terminus"], lw=1.6, ls="-.",
-                                  label=f"terminus {termini[0]:.2f} km"))
+                                  label=label))
         handles.append(Line2D([], [], color="black", lw=0.7, ls="--",
                               label="sea level"))
         ax.set_ylabel("Elevation (m WGS84)")
@@ -339,49 +334,139 @@ def _sea_level(profile) -> float:
     return float(np.nanmean(g))
 
 
-def _fill_section(ax, profile, surf, bed, ice_bottom, ice, ahead, grounded,
-                  sea_level, gp_km, project_bathymetry=True, bathymetry=None):
+@dataclass
+class _Section:
     """
-    Ice, water and earth polygons in polartoolkit's layer colours.
+    One classification of the column at every sample, with ordered interfaces.
+
+    Every fill reads from this, so the three polygons tile the column exactly
+    once. The old code derived a mask per fill from three different versions of
+    the picks, and where they disagreed the section grew holes and painted
+    ocean inside the glacier.
+    """
+
+    surf: np.ndarray        # ice top, NaN off the ice
+    base: np.ndarray        # ice bottom, NaN off the ice
+    seabed: np.ndarray      # top of solid ground, NaN where unknown
+    state: np.ndarray       # _NODATA / _GROUNDED / _FLOATING / _WATER / _NOBASE
+    surf_bridged: np.ndarray
+    base_bridged: np.ndarray
+    projected: np.ndarray   # seabed inferred rather than picked
+
+    @property
+    def ice(self):
+        return (self.state == _GROUNDED) | (self.state == _FLOATING)
+
+    @property
+    def submerged(self):
+        """Where the column holds water, i.e. where the water fill may go."""
+        return (self.state == _FLOATING) | (self.state == _WATER)
+
+    @property
+    def unresolved(self):
+        """Surface known, bottom not. Neither ice nor water can be drawn."""
+        return self.state == _NOBASE
+
+
+def _build_section(profile, gp_km, sea_level, bathymetry, floor,
+                   project_bathymetry=True, keel_clearance_m=15.0):
+    """
+    Interfaces and a per-sample state for the geometry panel.
 
     Radar gives the ice bottom, not the seabed, so what lies below the pick is
-    coloured by the detected grounding point: ocean seaward of it, bed landward.
-
-    Gaps in the picks are filled from the bridged surface and bed, so a short
-    dropout does not slice the section into blocks. A dropout is not water,
-    though: only what lies in front of the calving face is filled as ocean, so a
-    stretch with no pick stays blank rather than becoming a fjord.
+    set by the detected grounding point: ocean seaward of it, bed landward. The
+    seabed is then clamped under the ice above it, which is what stops a
+    disagreeing BedMachine bed drawing a line through the middle of the ice.
     """
-    y0 = ax.get_ylim()[0]
-    seabed = np.where(grounded, bed, np.nan)
-    projected = None
-    if bathymetry is not None:
-        projected = np.where(grounded | ~np.isfinite(bathymetry), np.nan,
-                             np.maximum(bathymetry, y0))
-    elif project_bathymetry:
-        projected = _project_seabed(profile, bed, gp_km, grounded, ice, y0)
-    if projected is not None:
-        seabed = np.where(np.isfinite(projected), projected,
-                          np.where(grounded, bed, np.nan))
+    surf, surf_bridged = _interp_gaps(profile.x, profile.h_surf, _MAX_BRIDGE_KM)
+    bed, base_bridged = _interp_gaps(profile.x, profile.h_bed, _MAX_BRIDGE_KM)
+    grounded = ((profile.x >= gp_km) if profile.landward_sign() > 0
+                else (profile.x <= gp_km))
 
-    ax.fill_between(profile.x, y0, seabed, where=np.isfinite(seabed),
+    # The ice runs to the terminus, but its bottom pick collapses before then,
+    # so the bottom is carried out at the depth it last held.
+    collapsed = _collapsed_bottom(profile, surf, bed, grounded)
+    if collapsed.any():
+        bed, held = _hold_front_bottom(profile, bed, collapsed, sea_level)
+        base_bridged = (base_bridged | held) & np.isfinite(bed)
+
+    ice = _ice_mask(surf, bed)
+    ahead = _ahead_of_terminus(profile, ice, gp_km)
+    ice = ice & ~ahead
+
+    # A stretch with no pick is unknown, not open water. Keeping that its own
+    # state is what stops a bed-pick gap being filled in as a fjord, and a
+    # surface with no bottom under it being filled in as ice.
+    state = np.full(profile.n, _NODATA, dtype=np.int8)
+    state[np.isfinite(surf) & ~ahead] = _NOBASE
+    state[ahead & np.isfinite(profile.h_surf)] = _WATER
+    state[ice & grounded] = _GROUNDED
+    state[ice & ~grounded] = _FLOATING
+
+    submerged = (state == _FLOATING) | (state == _WATER)
+    seabed = np.where(state == _GROUNDED, bed, np.nan)
+    under = _seabed_under_water(profile, bed, gp_km, grounded, ice, floor,
+                                bathymetry, project_bathymetry)
+    projected = np.zeros(profile.n, dtype=bool)
+    if under is not None:
+        # Also under the unresolved columns, so the fjord floor stays continuous
+        # across a stretch whose ice bottom is missing.
+        below = submerged | (state == _NOBASE)
+        projected = below & np.isfinite(under)
+        # Ordered, always: the seabed cannot rise through the ice above it or
+        # break the sea surface.
+        ceiling = np.where(ice, bed - keel_clearance_m, sea_level)
+        seabed = np.where(projected, np.clip(under, floor, ceiling), seabed)
+
+    # The surface is kept over the unresolved columns too: it is measured there,
+    # and it is the top of the band that marks what the bottom pick did not say.
+    known_top = ice | (state == _NOBASE)
+    return _Section(
+        surf=np.where(known_top, surf, np.nan),
+        base=np.where(ice, bed, np.nan),
+        seabed=seabed,
+        state=state,
+        surf_bridged=surf_bridged & known_top,
+        base_bridged=base_bridged & ice,
+        projected=projected,
+    )
+
+
+def _fill_section(ax, x, sec, sea_level, floor):
+    """Ice, water and earth polygons in polartoolkit's layer colours."""
+    drawn = sec.state != _NODATA
+    ax.fill_between(x, floor, sec.seabed, where=np.isfinite(sec.seabed),
                     color=LAYER_C["earth"], lw=0, zorder=2)
-    # Seabed to sea level, flat on top wherever there is water at all: the ice
-    # is drawn over it and takes back the part of the column it occupies, which
-    # keeps the sea surface level right up against the calving face instead of
-    # dipping to meet the ice bottom. One sample wider than the water itself,
-    # because the seabed steps down from the measured bed to the projected floor
-    # between two samples and that step is otherwise left as a white wedge.
-    ax.fill_between(profile.x, np.where(np.isfinite(seabed), seabed, y0),
-                    sea_level,
-                    where=_dilate((~grounded & ice) | ahead),
+    # Seabed to sea level, flat on top: the ice is drawn over it and takes back
+    # the part of the column it occupies, which keeps the sea surface level
+    # right up against the calving face instead of dipping to the ice bottom.
+    # Grown one sample into whatever is drawn beside it so the two polygons
+    # share an edge, but never into a gap, which is what used to leak ocean
+    # into the middle of the glacier.
+    ax.fill_between(x, np.where(np.isfinite(sec.seabed), sec.seabed, floor),
+                    sea_level, where=_grow(sec.submerged, drawn),
                     color=LAYER_C["water"], lw=0, zorder=1)
-    ax.fill_between(profile.x, ice_bottom, surf, where=ice,
+    ax.fill_between(x, sec.base, sec.surf, where=sec.ice,
                     color=LAYER_C["ice"], lw=0, zorder=3)
-    if projected is not None:
-        ax.plot(np.where(grounded, np.nan, profile.x), projected, color="black",
-                lw=1.2, ls="--", zorder=5)
-    return projected
+    # Ice whose bottom was interpolated rather than picked.
+    inferred = _grow(sec.base_bridged, sec.ice)
+    if inferred.any():
+        ax.fill_between(x, sec.base, sec.surf, where=inferred, facecolor="none",
+                        edgecolor="white", hatch="///", lw=0, zorder=3.5)
+    # Surface measured, bottom not: the column below it is left unresolved
+    # rather than guessed at as ice or as ocean.
+    if sec.unresolved.any():
+        ax.fill_between(x, np.where(np.isfinite(sec.seabed), sec.seabed, floor),
+                        sec.surf, where=_grow(sec.unresolved, drawn),
+                        facecolor="white", edgecolor=C["muted"], hatch="///",
+                        lw=0, alpha=0.9, zorder=3.2)
+    if sec.projected.any():
+        ax.plot(x, np.where(_grow(sec.projected, np.isfinite(sec.seabed)),
+                            sec.seabed, np.nan),
+                color="black", lw=1.2, ls="--", zorder=5)
+    for lo, hi in _runs_km(x, sec.state == _NODATA):
+        ax.axvspan(lo, hi, facecolor="none", edgecolor=C["muted"], lw=0.6,
+                   hatch="///", alpha=0.55, zorder=2.6)
 
 
 def _resolve_bathymetry(profile, spec):
@@ -404,6 +489,17 @@ def _resolve_bathymetry(profile, spec):
         raise ValueError(f"bathymetry has shape {values.shape}, expected "
                          f"{profile.x.shape}")
     return values
+
+
+def _seabed_under_water(profile, bed, gp_km, grounded, ice, floor, bathymetry,
+                        project_bathymetry):
+    """Seabed elevations to use wherever the radar stopped at the ice bottom."""
+    if bathymetry is not None:
+        return np.asarray(bathymetry, dtype=float)
+    if not project_bathymetry:
+        return None
+    level = _project_seabed(profile, bed, gp_km, grounded, ice, floor)
+    return None if level is None else np.full(profile.n, level)
 
 
 def _project_seabed(profile, bed, gp_km, grounded, ice, floor, window_km=2.0,
@@ -431,7 +527,51 @@ def _project_seabed(profile, bed, gp_km, grounded, ice, floor, window_km=2.0,
         depths.append(float(keels.min()) - clearance_m)
     if not depths:
         return None
-    return np.where(grounded, np.nan, max(min(depths), floor))
+    return max(min(depths), floor)
+
+
+def _depth_bound(profile, bathymetry, vis):
+    """
+    How deep the panel has to reach, from the picks and the seabed together.
+
+    BedMachine's deepest sample is taken at its 1st percentile rather than its
+    minimum: one spurious trough would otherwise set the scale and flatten the
+    ice into a strip at the top of the panel.
+    """
+    bed = profile.h_bed[vis]
+    if bathymetry is None:
+        return bed
+    sea = bathymetry[vis]
+    sea = sea[np.isfinite(sea)]
+    if not sea.size:
+        return bed
+    return np.append(bed, np.percentile(sea, 1.0))
+
+
+def _grow(mask, into):
+    """
+    Mask extended one sample into `into`, so adjacent fills share an edge.
+
+    Layer boundaries fall between samples, so two fills that stop on their own
+    last sample leave a white wedge at every contact. Growing only into what is
+    actually drawn beside them keeps the wedge closed without spilling a fill
+    into a stretch that has no data.
+    """
+    out = mask.copy()
+    out[:-1] |= mask[1:] & into[:-1]
+    out[1:] |= mask[:-1] & into[1:]
+    return out
+
+
+def _runs_km(x, mask, min_width_km=0.0):
+    """Contiguous True runs as (lo_km, hi_km) pairs."""
+    spans = []
+    edges = np.flatnonzero(np.diff(np.r_[False, mask, False].astype(np.int8)))
+    for start, stop in zip(edges[::2], edges[1::2]):
+        lo, hi = float(x[start]), float(x[stop - 1])
+        if hi - lo >= min_width_km:
+            spans.append((lo, hi))
+    return spans
 
 
 def _data_extent(profile, lo, hi, pad_km):
@@ -453,20 +593,28 @@ def _data_extent(profile, lo, hi, pad_km):
     return (x0, x1) if x1 > x0 else (lo - pad_km, hi + pad_km)
 
 
-def _interp_gaps(x, y):
+def _interp_gaps(x, y, max_gap_km=None):
     """
     Layer bridged linearly across interior gaps, plus a mask of what was made up.
 
-    Only gaps between picks are filled. Beyond the first and last pick there is
-    nothing to interpolate between, and a straight run off the end of the data
-    would be invention rather than interpolation.
+    Only gaps between picks are filled, and only ones narrower than max_gap_km.
+    Beyond the first and last pick there is nothing to interpolate between, and
+    a straight run across tens of km is invention rather than interpolation.
     """
     ok = np.isfinite(y)
     if ok.sum() < 2:
         return y, np.zeros(len(y), dtype=bool)
     filled = np.interp(x, x[ok], y[ok])
     inside = (x >= x[ok][0]) & (x <= x[ok][-1])
-    return np.where(inside, filled, np.nan), inside & ~ok
+    bridged = inside & ~ok
+    if max_gap_km is not None:
+        for lo, hi in _runs_km(x, bridged):
+            # One sample either side, the picks the bridge would span.
+            if (hi - lo) + 2 * float(np.median(np.diff(x))) > max_gap_km:
+                too_wide = (x >= lo) & (x <= hi)
+                filled[too_wide] = np.nan
+                bridged[too_wide] = False
+    return np.where(inside, filled, np.nan), bridged
 
 
 def _ice_mask(surf, bed):
@@ -497,7 +645,7 @@ def _collapsed_bottom(profile, surf, bed, grounded, tolerance=0.5):
             & (bed - profile.geoid_separation_m > tolerance * draft))
 
 
-def _hold_front_bottom(profile, bed, collapsed):
+def _hold_front_bottom(profile, bed, collapsed, sea_level, min_draft_m=20.0):
     """
     Ice bottom carried out to the terminus at the depth it last held.
 
@@ -507,6 +655,11 @@ def _hold_front_bottom(profile, bed, collapsed):
     would draw 100 m of ice as ocean. This walks back to where the pick stopped
     shoaling and holds that depth out to the front.
 
+    An anchor that is itself above the waterline is not held: on 20060608_01 the
+    pick sits on the surface across the whole shelf, and holding it drew 8 km of
+    ice with its base 80 m above sea level and ocean underneath. That bottom is
+    left unknown instead.
+
     Returns the bottom and a mask of the samples it made up.
     """
     seaward = slice(None) if profile.landward_sign() < 0 else slice(None, None, -1)
@@ -514,13 +667,14 @@ def _hold_front_bottom(profile, bed, collapsed):
     anchor = int(np.argmax(collapsed[seaward]))
     while anchor > 0 and np.isfinite(b[anchor - 1]) and b[anchor - 1] < b[anchor]:
         anchor -= 1
-    if not np.isfinite(b[anchor]):
-        return bed, np.zeros(len(bed), dtype=bool)
 
-    patched = np.zeros(len(b), dtype=bool)
-    patched[anchor + 1:] = True
-    b[anchor + 1:] = b[anchor]
-    return b[seaward], patched[seaward]
+    held = np.zeros(len(b), dtype=bool)
+    if np.isfinite(b[anchor]) and b[anchor] < sea_level - min_draft_m:
+        held[anchor + 1:] = True
+        b[anchor + 1:] = b[anchor]
+    else:
+        b[anchor:] = np.nan
+    return b[seaward], held[seaward]
 
 
 def _ahead_of_terminus(profile, ice, gp_km):
@@ -559,9 +713,18 @@ def _dilate(mask):
     return out
 
 
-def _bridge(y, gap):
-    """The bridged samples only, joined to the measured pick either side."""
-    return np.where(_dilate(gap), y, np.nan)
+def _surf_at(profile, sec, x_km):
+    """
+    Ice surface at a position, for placing a marker on it.
+
+    Off the interpolated surface it falls back to the raw pick, so a marker
+    landing in a gap still sits on the section rather than vanishing.
+    """
+    for values in (sec.surf, profile.h_surf):
+        ok = np.isfinite(values)
+        if ok.any():
+            return float(np.interp(x_km, profile.x[ok], values[ok]))
+    return np.nan
 
 
 def _tight_ylim(ax, lower, upper, pad_frac=0.12):
