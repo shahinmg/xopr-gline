@@ -20,6 +20,8 @@ import threading
 import uuid
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -45,6 +47,12 @@ USEABLE_LINES = Path("data/flight_lines/cresis_useable_flight_lines.gpkg")
 # the first Greenland sweep; every km-denominated setting downstream then means
 # a different number of samples on every run and no two runs are comparable.
 DEFAULT_DX_KM = 0.25
+
+# Above this, the flight's surface elevation is too far off sea level over open
+# water to be snow-covered sea ice, and every flotation quantity on it carries
+# the offset. 2017_Greenland_P3 reads -29.3 m on Petermann. Diagnostic only:
+# nothing is corrected by it.
+DATUM_SUSPECT_M = 10.0
 
 # plot_detection draws through pyplot, which keeps global state.
 _PLOT_LOCK = threading.Lock()
@@ -183,6 +191,12 @@ def run_segment(collection: Optional[str], segment: str,
                 saturate_m: float = SATURATE_M,
                 fig_dir=None,
                 bathymetry=None,
+                radargram: bool = False,
+                datum_correct: bool = False,
+                crop_features: bool = False,
+                channels: Optional[Sequence[str]] = None,
+                reference=None,
+                reference_pattern: str = "*.shp",
                 **extra) -> dict:
     """
     Detect a grounding point on one segment, returning a row whatever happens.
@@ -200,6 +214,7 @@ def run_segment(collection: Optional[str], segment: str,
            "headline": headline, "snap_to_terminus": snap_to_terminus,
            "amp_cutoff_km": amp_cutoff_km, "elev_cutoff_km": elev_cutoff_km,
            "saturate_m": saturate_m, "resample_interval": resample_interval,
+           "datum_correct": datum_correct, "crop_features": crop_features,
            "status": "error", "reason": "", **extra}
     if not collection or (isinstance(collection, float) and np.isnan(collection)):
         row["status"] = "not_in_catalog"
@@ -218,6 +233,19 @@ def run_segment(collection: Optional[str], segment: str,
         return row
 
     row.update(_profile_fields(profile))
+
+    # Off by default. Open water must sit at sea level, so its measured height
+    # is this flight's datum error; folding it into the geoid separation shifts
+    # every flotation quantity back. A flight with no open water in range is
+    # left alone rather than guessed at.
+    if datum_correct:
+        offset = row["sea_level_offset_m"]
+        if np.isfinite(offset):
+            profile = replace(
+                profile,
+                geoid_separation_m=profile.geoid_separation_m + offset)
+            row["sea_level_offset_after_m"] = profile.sea_level_offset_m()
+        row["datum_corrected_m"] = offset if np.isfinite(offset) else np.nan
 
     # screen_profile picks the along-flow leg itself and judges on it, so the
     # profile must NOT be cropped first or the leg gets selected twice.
@@ -241,16 +269,24 @@ def run_segment(collection: Optional[str], segment: str,
         except Exception as exc:
             row["reason"] = _reason(exc)
 
+    # The leg sets the window; the features are computed on whatever profile
+    # `crop_features` selects. Cropping both truncates the elevation low-pass,
+    # whose cutoff is tens of km, and the pick then moves with the crop: on
+    # 20170331_01 frames 16-18 it ran 78.26 km cropped against 79.26 km on the
+    # full profile, and a 64 km crop collapsed both models onto the window edge.
+    leg_profile = profile
     if auto_leg:
         if leg is None:
             row["status"] = "no_leg"
             row["reason"] = row["reason"] or "no along-flow leg crosses flotation"
             return row
-        profile = profile.window(*leg)
+        leg_profile = profile.window(*leg)
         row["leg_lo_km"], row["leg_hi_km"] = leg
+        if crop_features:
+            profile = leg_profile
 
     try:
-        window = profile.flotation_window(margin_km)
+        window = leg_profile.flotation_window(margin_km)
     except Exception as exc:
         row["status"] = "no_window"
         row["reason"] = _reason(exc)
@@ -258,20 +294,41 @@ def run_segment(collection: Optional[str], segment: str,
     row["window_lo_km"], row["window_hi_km"] = window
     # The elevation's own estimate of where grounding begins, independent of
     # anything the bed-echo detectors do. Recorded so a pick sitting on the
-    # seaward clamp can be judged against the geometry after the fact.
+    # seaward clamp can be judged against the geometry after the fact. From the
+    # leg, like the window it explains.
     try:
-        row["flotation_crossing_km"] = profile.flotation_crossing_km()
+        row["flotation_crossing_km"] = leg_profile.flotation_crossing_km()
     except ValueError:
         row["flotation_crossing_km"] = np.nan
 
     features = default_features(amp_cutoff_km, elev_cutoff_km, saturate_m)
     by_name = {f.name: f for f in features}
+    if channels is not None:
+        unknown = [c for c in channels if c not in by_name]
+        if unknown:
+            row["status"] = "bad_channels"
+            row["reason"] = (f"unknown channels {unknown}; "
+                             f"have {sorted(by_name)}")
+            return row
+        features = tuple(by_name[c] for c in channels)
+        by_name = {f.name: f for f in features}
+    row["channels"] = ",".join(f.name for f in features)
+
+    # Onset and gradient each read one specific channel, and BOCPD's primary is
+    # the flotation residual; a channel set without them drops those detectors
+    # rather than failing the row. Ablation showed the set moves picks by km,
+    # so it is recorded like any other setting.
+    detectors = []
+    if "amp" in by_name:
+        detectors.append(("onset", OnsetDetector(feature=by_name["amp"])))
+    detectors.append(("bocpd", BOCPDDetector(
+        features=features, pad_km=pad_km,
+        primary="dfree" if "dfree" in by_name else features[0].name)))
+    if "dA" in by_name:
+        detectors.append(("gradient", GradientDetector(feature=by_name["dA"])))
+
     results = {}
-    for name, detector in (
-        ("onset", OnsetDetector(feature=by_name["amp"])),
-        ("bocpd", BOCPDDetector(features=features, pad_km=pad_km)),
-        ("gradient", GradientDetector(feature=by_name["dA"])),
-    ):
+    for name, detector in detectors:
         try:
             results[name] = detector.detect(profile, window)
         except Exception as exc:
@@ -299,22 +356,79 @@ def run_segment(collection: Optional[str], segment: str,
     row.update(snapped)
     row["status"] = "ok"
 
+    # Reported and drawn, never searched in: the zone is a different
+    # measurement, usually from a different year, so it validates a pick rather
+    # than constraining one.
+    bands, gz_label = [], None
+    if reference is not None:
+        from .grounding.reference import epoch_label, zone_crossings_km
+        try:
+            zone = _reference_zone(profile, reference,
+                                   row.get("date") or profile.source.date,
+                                   reference_pattern)
+            bands = zone_crossings_km(profile, zone)
+            gz_label = epoch_label(zone)
+            row.update(_gz_fields(profile, pick, bands, reference, zone))
+        except Exception as exc:
+            row["gz_reason"] = _reason(exc)
+
     if fig_dir is not None:
         row.update(_write_figure(profile, results, fig_dir,
                                  row.get("run_id") or segment,
-                                 bathymetry if bathymetry is not None else geoid))
+                                 bathymetry if bathymetry is not None else geoid,
+                                 opr=opr, radargram=radargram,
+                                 resample_interval=resample_interval, gz=bands,
+                                 gz_label=gz_label))
     return row
 
 
-def _write_figure(profile, results, fig_dir, name, bathymetry) -> dict:
+@lru_cache(maxsize=8)
+def _load_reference(path: str, pattern: str):
+    """Zone layers for a path, loaded once however many segments ask for them."""
+    from .grounding.reference import load_zones
+    return load_zones(path, pattern)
+
+
+def _reference_zone(profile, reference, date, pattern):
+    """The zone layer nearest `date`, from a path or a ready geodataframe."""
+    from .grounding.reference import zone_for_date
+
+    zones = (_load_reference(str(reference), pattern)
+             if isinstance(reference, (str, Path)) else reference)
+    return zone_for_date(zones, pd.Timestamp(date)) if date else zones
+
+
+def _gz_fields(profile, pick, bands, reference, zone) -> dict:
+    """Where the zone sits on this profile and how far the pick is from it."""
+    from .grounding.reference import epoch_label, offset_from_zone_km
+
+    name = (zone["zone_name"].iloc[0]
+            if zone is not None and "zone_name" in zone else None)
+    fields = {"gz_source": str(reference), "gz_zone": name,
+              "gz_epoch": epoch_label(zone), "gz_crossings": len(bands)}
+    if not bands:
+        return {**fields, "gz_lo_km": np.nan, "gz_hi_km": np.nan,
+                "gz_offset_km": np.nan}
+    near = min(bands, key=lambda b: abs(np.mean(b) - pick.map_km))
+    return {**fields, "gz_lo_km": near[0], "gz_hi_km": near[1],
+            "gz_offset_km": offset_from_zone_km(profile, pick.map_km, bands)}
+
+
+def _write_figure(profile, results, fig_dir, name, bathymetry, opr=None,
+                  radargram=False, resample_interval="2s", gz=None,
+                  gz_label=None) -> dict:
     """
-    Write the four-panel detection figure for one run.
+    Write the detection figure for one run.
 
     plot_detection drives pyplot, whose state is global, so figures are drawn
     one at a time however many threads the sweep runs. Drawing is seconds
     against a download of tens, so the lock costs little.
+
+    The radargram is loaded outside the lock: it refetches the frames, which is
+    the slow part and is not pyplot's business.
     """
     from .grounding.plotting import plot_detection
+    from .grounding.radargram import Radargram
 
     fig_dir = Path(fig_dir)
     fig_dir.mkdir(parents=True, exist_ok=True)
@@ -322,12 +436,20 @@ def _write_figure(profile, results, fig_dir, name, bathymetry) -> dict:
     # Same order as run_grounding.py: onset first, then the changepoint it is
     # measured against, then the rest.
     ordered = [results[k] for k in ("onset", "bocpd", "gradient") if k in results]
+    row, echo = {}, None
+    if radargram:
+        try:
+            echo = Radargram.from_profile(profile, opr=opr,
+                                          resample_interval=resample_interval)
+        except Exception as exc:
+            row["radargram_reason"] = _reason(exc)
     try:
         with _PLOT_LOCK:
-            plot_detection(profile, ordered, str(path), bathymetry=bathymetry)
+            plot_detection(profile, ordered, str(path), bathymetry=bathymetry,
+                           radargram=echo, gz=gz, gz_label=gz_label)
     except Exception as exc:
-        return {"figure_reason": _reason(exc)}
-    return {"figure": str(path)}
+        return {**row, "figure_reason": _reason(exc)}
+    return {**row, "figure": str(path)}
 
 
 # -- the sweep -------------------------------------------------------------
@@ -545,6 +667,9 @@ def _iso(value):
 
 def _profile_fields(profile: GlacierProfile) -> dict:
     source = profile.source
+    # Diagnostic only: nothing is corrected by it. Measured on the whole
+    # profile, before the leg crop, since that is where the open water is.
+    offset = profile.sea_level_offset_m()
     return {
         "n_samples": profile.n,
         "dx_m": profile.dx * 1000.0,
@@ -553,6 +678,10 @@ def _profile_fields(profile: GlacierProfile) -> dict:
         "n_frames": None if source is None else source.n_frames,
         "acquired": None if source is None or source.date is None
                     else str(source.date),
+        "sea_level_offset_m": offset,
+        "sea_level_n": profile.sea_level_samples(),
+        "datum_suspect": bool(np.isfinite(offset)
+                              and abs(offset) > DATUM_SUSPECT_M),
     }
 
 

@@ -74,6 +74,10 @@ def main():
     p.add_argument("--gz_lo", type=float, default=None,
                    help="InSAR GZ seaward edge, km. Reported, never used to search")
     p.add_argument("--gz_hi", type=float, default=None)
+    p.add_argument("--gz_layer", default=None,
+                   help="vector file or directory of InSAR grounding zones to "
+                        "draw. The epoch nearest the flight is used. Reported, "
+                        "never used to search")
     p.add_argument("--normalised", action="store_true",
                    help="also run with standardised features")
     p.add_argument("--pad_km", type=float, default=4.0,
@@ -88,6 +92,9 @@ def main():
                    help="tanh scale for the flotation residual channel. 0 off")
     p.add_argument("--cache_dir", default=None)
     p.add_argument("--fig", default=None, help="write a figure to this path")
+    p.add_argument("--radargram", action="store_true",
+                   help="add a radargram panel with the layer picks and the "
+                        "changepoints over the echo. Reloads the frames")
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args()
 
@@ -191,17 +198,17 @@ def main():
             print(f"    baseline {r.extra['baseline_dB']:.1f} dB "
                   f"+/- {r.extra['sigma_dB']:.2f} from {lo_b:.1f}-{hi_b:.1f} km")
 
+    # The changepoint is the grounding point, matching the sweep's headline and
+    # the figure. The onset is the seaward edge of the transition it sits in.
+    print(f"\n  grounding point (changepoint): {changepoint.map_km:.2f} km")
     if onset is not None:
         width = transition_width_km(onset, changepoint,
                                     profile.landward_sign())
-        print(f"\n  grounding point (onset)   : {onset.map_km:.2f} km")
+        print(f"  bed-echo onset            : {onset.map_km:.2f} km")
         print(f"  transition width          : {width:.2f} km  "
               f"(onset -> steepest; wide means a diffuse zone)")
-    else:
-        print(f"\n  grounding point (changepoint): {changepoint.map_km:.2f} km"
-              f"  [onset skipped]")
 
-    headline = onset if onset is not None else changepoint
+    headline = changepoint
     frame = headline.frame
     print(f"  position                  : {headline.lat:.5f}, {headline.lon:.5f}"
           + (f"  in {frame.granule}" if frame is not None else ""))
@@ -225,13 +232,29 @@ def main():
 
     if args.fig:
         from xopr_gline.grounding.plotting import plot_detection
-        gz = None
-        if args.gz_lo is not None:
+        gz, gz_label = None, None
+        if args.gz_layer:
+            from xopr_gline.grounding.reference import (epoch_label,
+                                                        load_zones,
+                                                        zone_crossings_km,
+                                                        zone_for_date)
+            zones = zone_for_date(load_zones(args.gz_layer), profile.source.date)
+            gz = zone_crossings_km(profile, zones) or None
+            gz_label = epoch_label(zones)
+            print(f"\n  GZ layer: {zones['zone_name'].iloc[0]}  "
+                  f"crossings: {gz}")
+        elif args.gz_lo is not None:
             gz = (args.gz_lo, args.gz_hi if args.gz_hi is not None else args.gz_lo)
         # Title is the provenance alone; how the window was set is printed
         # above and shown by the shaded band.
+        radargram = None
+        if args.radargram:
+            from xopr_gline.grounding import Radargram
+            radargram = Radargram.from_profile(profile, opr=opr,
+                                               resample_interval=args.resample)
         plot_detection(profile, results, args.fig, gz=gz,
-                       bathymetry=args.bathymetry)
+                       bathymetry=args.bathymetry, radargram=radargram,
+                       gz_label=gz_label)
         print(f"\n  figure: {args.fig}")
 
 
