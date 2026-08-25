@@ -408,6 +408,31 @@ class GlacierProfile:
                 sustained[start:stop + 1] = True
         return thin & (~degenerate | sustained)
 
+    def sea_level_offset_m(self, min_samples: int = 10,
+                           min_thickness_m: float = 25.0,
+                           min_run_km: float = 1.0) -> float:
+        """
+        Median surface elevation over open water, in m above the geoid.
+
+        Open water sits at sea level, so anything else is this flight's
+        elevation datum error, which offsets every flotation quantity by the
+        same amount. NaN where the line holds too little open water to measure
+        it. A metre or two is real: a spring fjord is snow-covered sea ice whose
+        surface does sit above the waterline.
+        """
+        water = (self.open_water(min_thickness_m, min_run_km)
+                 & np.isfinite(self.h_surf_msl))
+        if water.sum() < min_samples:
+            return np.nan
+        return float(np.median(self.h_surf_msl[water]))
+
+    def sea_level_samples(self, min_thickness_m: float = 25.0,
+                          min_run_km: float = 1.0) -> int:
+        """How many open-water samples sea_level_offset_m had to work from."""
+        water = (self.open_water(min_thickness_m, min_run_km)
+                 & np.isfinite(self.h_surf_msl))
+        return int(water.sum())
+
     def terminus_crossings_km(self, min_thickness_m: float = 25.0,
                               min_open_km: float = 1.0) -> list:
         """
@@ -533,20 +558,7 @@ class GlacierProfile:
             peak power. Sets dx: '2s' gives ~287 m, '5s' gives ~717 m.
         """
         opr = opr or xopr.opr_access.OPRConnection()
-        stac_items = opr.query_frames(
-            collections=[collection], segment_paths=[segment]
-        )
-        stac_items = _sort_by_frame(stac_items)
-        if frames is not None:
-            wanted = set(int(f) for f in frames)
-            stac_items = stac_items.iloc[
-                [i for i, p in enumerate(stac_items["properties"])
-                 if _frame_number(p) in wanted]
-            ]
-        elif frame_slice is not None:
-            stac_items = stac_items.iloc[frame_slice]
-        if len(stac_items) == 0:
-            raise ValueError(f"no frames found for {collection}/{segment}")
+        stac_items = select_frames(opr, collection, segment, frames, frame_slice)
 
         x_elev, h_surf, h_bed, x_track, lat_t, lon_t, spans = _load_elevations(
             opr, stac_items
@@ -585,6 +597,32 @@ class GlacierProfile:
 
 
 # -- helpers --------------------------------------------------------------
+def select_frames(opr, collection: str, segment: str,
+                  frames: Optional[Sequence[int]] = None,
+                  frame_slice: Optional[slice] = None):
+    """
+    Catalog items for a segment, in frame order and narrowed to a subset.
+
+    `frames` names frame numbers and wins over `frame_slice`, which is
+    positional. Shared with the radargram loader so a figure covers exactly the
+    frames the profile was built from.
+    """
+    stac_items = _sort_by_frame(
+        opr.query_frames(collections=[collection], segment_paths=[segment])
+    )
+    if frames is not None:
+        wanted = set(int(f) for f in frames)
+        stac_items = stac_items.iloc[
+            [i for i, p in enumerate(stac_items["properties"])
+             if _frame_number(p) in wanted]
+        ]
+    elif frame_slice is not None:
+        stac_items = stac_items.iloc[frame_slice]
+    if len(stac_items) == 0:
+        raise ValueError(f"no frames found for {collection}/{segment}")
+    return stac_items
+
+
 def _frame_number(properties) -> Optional[int]:
     """Frame number from a STAC item's properties, or None if absent."""
     return properties.get("opr:frame") if isinstance(properties, dict) else None

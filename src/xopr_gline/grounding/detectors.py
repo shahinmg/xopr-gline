@@ -138,7 +138,19 @@ class BOCPDDetector(Detector):
         # the ensemble is the one that could have displaced the pick.
         trim = max(trims)
 
-        combined = _geometric_mean(list(posteriors.values()))
+        # A model whose peak sits in the padding is saying there is no
+        # changepoint inside the reported window. Renormalising it into that
+        # range piles its mass on the boundary, and the geometric mean then
+        # drags the combined pick there: on 20170331_01 frames 16-18, ifm peaks
+        # at 72.01 km in the pad and reports 73.51 km, the window edge, pulling
+        # the answer 2.5 km seaward of fullcov's 78.51 km. Such a model is kept
+        # out of the combination unless every model is like that, in which case
+        # there is nothing better to fall back on.
+        peaks = {k: float(x_cp[np.argmax(v)]) for k, v in posteriors.items()}
+        voting, dropped = _select_voting(peaks, self.models, lo, hi,
+                                         self.pad_km)
+
+        combined = _geometric_mean([posteriors[k] for k in voting])
         combined = uniform_filter1d(combined, size=self.smooth_size)
 
         # Report inside the requested window only: the padding exists to give
@@ -176,6 +188,10 @@ class BOCPDDetector(Detector):
                 # x_km, which is what the plotting assumes.
                 "model_posteriors": {k: _renormalise(v[report])
                                      for k, v in posteriors.items()},
+                # Which models the combined posterior is actually made of, and
+                # which were left out for peaking in the padding.
+                "models_voting": tuple(voting),
+                "models_dropped": tuple(dropped),
                 "features": [f.name for f in self.features],
                 "analysis_window": (float(alo), float(ahi)),
                 "padded_lo": bool(padded_lo),
@@ -213,6 +229,32 @@ def analysis_window(profile: GlacierProfile, lo: float, hi: float,
     return (alo, ahi,
             bool(lo - alo >= profile.dx),
             bool(ahi - hi >= profile.dx))
+
+
+def _select_voting(peaks, models, lo, hi, pad_km) -> tuple:
+    """
+    Which models the combined posterior should be built from.
+
+    A model whose peak sits in the padding is saying there is no changepoint
+    inside the reported window; renormalising it into that range piles its mass
+    on the boundary and drags the combined pick there. On 20170331_01 frames
+    16-18, ifm peaks at 72.01 km in the pad and reports 73.51 km, the window
+    edge, pulling the answer 2.5 km seaward of fullcov's 78.51 km.
+
+    It is only dropped where the models are not describing the same change:
+    peaks further apart than the context they were given cannot be one feature
+    seen twice. A peak just outside the limit and one just inside agree that
+    the change sits near the boundary, and there reporting the edge stays the
+    honest answer.
+
+    Returns (voting, dropped).
+    """
+    inside = [k for k in models if lo <= peaks[k] <= hi]
+    outside = [k for k in models if k not in inside]
+    if not inside or not outside:
+        return list(models), []
+    spread = max(abs(peaks[a] - peaks[b]) for a in inside for b in outside)
+    return (inside, outside) if spread > pad_km else (list(models), [])
 
 
 def _edge_flags(map_km, lo, hi, dx, edge_samples, padded_lo, padded_hi,

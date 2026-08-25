@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from xopr_gline.grounding import (BOCPDDetector, GlacierProfile, OnsetDetector)
-from xopr_gline.grounding.detectors import analysis_window
+from xopr_gline.grounding.detectors import _select_voting, analysis_window
 from xopr_gline.grounding.features import (FlotationResidual, _saturate,
                                            default_features)
 
@@ -231,3 +231,47 @@ def test_saturation_compresses_the_inland_ramp_but_keeps_the_sign():
 def test_saturation_is_optional():
     values = np.array([-1000.0, 1000.0])
     assert np.array_equal(_saturate(values, 0.0), values)
+
+
+# -- model selection -------------------------------------------------------
+def test_a_model_peaking_in_the_padding_does_not_vote():
+    """
+    20170331_01 frames 16-18: ifm peaks at 72.01 km in the pad and can only
+    report the window edge, dragging the combination 2.5 km seaward of the
+    change fullcov actually found.
+    """
+    peaks = {"ifm": 72.01, "fullcov": 78.51}
+    voting, dropped = _select_voting(peaks, ("ifm", "fullcov"),
+                                     lo=73.51, hi=97.51, pad_km=4.0)
+    assert voting == ["fullcov"]
+    assert dropped == ["ifm"]
+
+
+def test_models_agreeing_near_the_limit_still_report_the_edge():
+    """
+    A peak just outside the window and one just inside are the same change seen
+    at the boundary. Dropping either would claim a change further in than the
+    data supports, which is the case the padding exists to report honestly.
+    """
+    peaks = {"ifm": 14.5, "fullcov": 16.25}
+    voting, dropped = _select_voting(peaks, ("ifm", "fullcov"),
+                                     lo=15.5, hi=24.0, pad_km=4.0)
+    assert voting == ["ifm", "fullcov"]
+    assert dropped == []
+
+
+def test_every_model_peaking_outside_leaves_them_all_voting():
+    """With nothing found inside, the edge is the only answer available."""
+    peaks = {"ifm": 10.0, "fullcov": 11.0}
+    voting, dropped = _select_voting(peaks, ("ifm", "fullcov"),
+                                     lo=15.5, hi=24.0, pad_km=4.0)
+    assert voting == ["ifm", "fullcov"]
+    assert dropped == []
+
+
+def test_the_selection_partitions_the_models():
+    for peaks in ({"ifm": 72.0, "fullcov": 78.5}, {"ifm": 14.5, "fullcov": 16.25},
+                  {"ifm": 80.0, "fullcov": 81.0}):
+        voting, dropped = _select_voting(peaks, ("ifm", "fullcov"),
+                                         lo=73.51, hi=97.51, pad_km=4.0)
+        assert sorted(voting + dropped) == ["fullcov", "ifm"]

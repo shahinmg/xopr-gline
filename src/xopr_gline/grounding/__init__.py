@@ -19,6 +19,11 @@ from .features import FilterSpec as FilterSpec
 from .profile import FrameSpan as FrameSpan
 from .profile import GlacierProfile as GlacierProfile
 from .profile import ProfileSource as ProfileSource
+from .radargram import Radargram as Radargram
+from .reference import load_zones as load_zones
+from .reference import offset_from_zone_km as offset_from_zone_km
+from .reference import zone_crossings_km as zone_crossings_km
+from .reference import zone_for_date as zone_for_date
 from .result import DetectionResult as DetectionResult
 from .screening import SegmentScreen as SegmentScreen
 from .screening import screen_profile as screen_profile

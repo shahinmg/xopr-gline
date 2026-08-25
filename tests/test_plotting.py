@@ -14,7 +14,10 @@ from xopr_gline.constants import DEFAULT_CONSTANTS
 from xopr_gline.grounding.plotting import (_GROUNDED, _MAX_BRIDGE_KM, _NOBASE,
                                            _build_section, _hold_front_bottom,
                                            _interp_gaps)
-from xopr_gline.grounding.profile import GlacierProfile
+from xopr_gline.grounding.profile import (FrameSpan, GlacierProfile,
+                                          ProfileSource)
+from xopr_gline.grounding.radargram import (_PAD_VALUES, _anchor_shift,
+                                            _regrid_columns)
 
 GEOID = 30.0
 SEA_LEVEL = GEOID
@@ -174,3 +177,40 @@ def test_the_section_survives_any_grounding_point(gp_km):
     assert sec.state.shape == profile.x.shape
     assert np.isfinite(sec.surf[sec.ice]).all()
     assert np.isfinite(sec.base[sec.ice]).all()
+
+
+# -- radargram ------------------------------------------------------------
+def test_a_frame_gap_stays_a_gap_across_the_regrid():
+    """Columns far from any trace are NaN, not the nearest trace smeared over."""
+    x_src = np.r_[np.arange(0.0, 10.0, 0.3), np.arange(15.0, 20.0, 0.3)]
+    power = np.tile(np.arange(len(x_src), dtype=float)[:, None], (1, 4))
+    x, out = _regrid_columns(x_src, power, dx_km=0.3)
+
+    blank = np.isnan(out[:, 0])
+    assert blank.any()
+    assert 10.0 <= x[blank].min() <= 11.5 and 13.5 <= x[blank].max() <= 15.0
+    assert np.allclose(np.diff(x), 0.3)
+    assert not np.isnan(out[x < 9.0]).any()
+
+
+def test_the_radargram_is_registered_onto_the_profile_axis():
+    """A different frame subset shifts the origin; the anchor takes it back."""
+    anchor = ProfileSource(frames=(FrameSpan(frame=7, lo_km=100.0),
+                                   FrameSpan(frame=8, lo_km=120.0)))
+    spans = (FrameSpan(frame=7, lo_km=0.0), FrameSpan(frame=8, lo_km=20.0))
+    assert _anchor_shift(spans, anchor) == 100.0
+    assert _anchor_shift(spans, None) == 0.0
+
+
+def test_frames_that_do_not_overlap_the_profile_are_refused():
+    anchor = ProfileSource(frames=(FrameSpan(frame=7, lo_km=100.0),))
+    with pytest.raises(ValueError, match="registered"):
+        _anchor_shift((FrameSpan(frame=99, lo_km=0.0),), anchor)
+
+
+def test_the_vertical_pad_values_are_not_drawn_as_echo():
+    """imshow gets NaN where interpolate_to_vertical_grid padded a trace."""
+    power = np.array([[-1.0, 5.0, -2.0], [3.0, -1.0, 4.0]])
+    power[np.isin(power, _PAD_VALUES)] = np.nan
+    assert np.isnan(power).sum() == 3
+    assert np.nanmin(power) == 3.0
