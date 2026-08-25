@@ -50,6 +50,10 @@ C = {
 }
 MODEL_C = {"gauss": "#E69F00", "ifm": "#56B4E9", "fullcov": "#009E73"}
 
+# Layer picks over the greyscale radargram, where the section's browns and
+# blues disappear into the echo.
+RADAR_C = {"surf": "#56B4E9", "bed": "#F0E442"}
+
 # GMT defaults: Helvetica, thin black frame, outward ticks, 300 dpi.
 GMT_RC = {
     "font.family": "sans-serif",
@@ -82,15 +86,23 @@ def plot_detection(profile: GlacierProfile,
                    title: Optional[str] = None,
                    fill_layers: bool = True,
                    project_bathymetry: bool = True,
-                   bathymetry=None):
+                   bathymetry=None,
+                   radargram=None,
+                   gz_label: Optional[str] = None):
     """
-    Four panels: geometry, the flotation residual that set the window, bed
-    power, and the posterior.
+    Geometry, the flotation residual that set the window, bed power, and the
+    posterior, under an optional radargram.
 
     bathymetry draws the seabed under floating ice, where radar stops at the ice
     bottom: a BedMachine path to sample 'bed' along the line, or an array on the
     profile's grid. Without it the seabed is drawn flat, and either way the
     radar picks are untouched.
+
+    radargram is a Radargram on the profile's along-track axis, drawn as a top
+    panel with the layer picks and the detected changepoints over the echo.
+
+    gz shades a reference grounding zone: one (lo_km, hi_km) band or several.
+    gz_label names it in the legend, e.g. the survey epoch '2011-2015'.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -104,16 +116,27 @@ def plot_detection(profile: GlacierProfile,
         onset = by_name.get("onset")
         lo, hi = primary.search_window
         x0, x1 = _data_extent(profile, lo, hi, pad_km)
+        bands = _gz_bands(gz)
 
-        fig, axs = plt.subplots(4, 1, figsize=(13, 14), sharex=True,
-                                gridspec_kw=dict(
-                                    height_ratios=[2.1, 1.3, 1.3, 1.7],
-                                    hspace=0.09))
+        ratios = {"radar": 1.9, "geom": 2.1, "resid": 1.3, "amp": 1.3,
+                  "post": 1.7}
+        panels = (["radar"] if radargram is not None else []) + [
+            "geom", "resid", "amp", "post"]
+        fig, axs = plt.subplots(
+            len(panels), 1, figsize=(13, sum(ratios[p] for p in panels) * 2.19),
+            sharex=True,
+            gridspec_kw=dict(height_ratios=[ratios[p] for p in panels],
+                             hspace=0.09))
+        panel = dict(zip(panels, axs))
         for ax in axs:
             _gmt_frame(ax)
+            # Not over the radargram: a translucent wash reads as a colour cast
+            # on the greyscale echo, and the panels below already show the band.
+            if ax is panel.get("radar"):
+                continue
             ax.axvspan(lo, hi, color=C["window"], alpha=0.09, zorder=4)
-            if gz:
-                ax.axvspan(gz[0], gz[1], color=C["gz"], alpha=0.22, zorder=4)
+            for band in bands:
+                ax.axvspan(band[0], band[1], color=C["gz"], alpha=0.22, zorder=4)
 
         # Calving front from the data, where thickness collapses. Absent on a
         # transect that never reaches open water, e.g. Petermann 7:11. The
@@ -134,15 +157,22 @@ def plot_detection(profile: GlacierProfile,
         vis = (profile.x >= x0) & (profile.x <= x1)
         sea_level = _sea_level(profile)
 
+        # -- radargram ------------------------------------------------------
+        if radargram is not None:
+            _draw_radargram(panel["radar"], radargram, profile, vis, primary,
+                            onset)
+
         # -- geometry -----------------------------------------------------
-        ax = axs[0]
+        ax = panel["geom"]
         # The seabed sets the floor along with the picks: BedMachine's trough
         # runs 200 m below Helheim's deepest bed pick and would be clipped off.
         bathy = _resolve_bathymetry(profile, bathymetry)
         _tight_ylim(ax, _depth_bound(profile, bathy, vis), profile.h_surf[vis])
         floor = ax.get_ylim()[0]
-        gp = onset.map_km if onset is not None else primary.map_km
-        sec = _build_section(profile, gp, sea_level, bathy, floor,
+        # The changepoint is the grounding point, so it is what splits grounded
+        # from floating in the section. The onset is where the bed echo starts
+        # to change, i.e. the seaward edge of the transition, not the pick.
+        sec = _build_section(profile, primary.map_km, sea_level, bathy, floor,
                              project_bathymetry)
         ice = sec.ice
         handles = []
@@ -185,24 +215,22 @@ def plot_detection(profile: GlacierProfile,
                                  label="no bottom pick"))
         ax.axhline(sea_level, color="black", lw=0.7, ls="--", alpha=0.8,
                    zorder=5)
-        ax.axvline(primary.map_km, color=C["map"], lw=1.8, ls="--", alpha=0.9,
-                   zorder=6)
         if onset is not None:
-            ax.axvline(onset.map_km, color=C["onset"], lw=2.2, alpha=0.95,
-                       zorder=6)
+            ax.axvline(onset.map_km, color=C["onset"], lw=1.6, ls=":",
+                       alpha=0.9, zorder=6)
             ax.scatter([onset.map_km], [_surf_at(profile, sec, onset.map_km)],
-                       s=180, color=C["onset"], edgecolors="white", lw=1.8,
-                       zorder=7)
-            handles.append(Line2D([], [], color=C["onset"], marker="o", lw=2.2,
-                                  mec="white", mew=1.4, ms=10,
-                                  label=f"grounding point (onset) "
-                                        f"{onset.map_km:.2f} km"))
+                       s=110, color=C["onset"], marker="v", edgecolors="white",
+                       lw=1.4, zorder=7)
+            handles.append(Line2D([], [], color=C["onset"], marker="v", lw=1.6,
+                                  ls=":", mec="white", mew=1.2, ms=8,
+                                  label=f"bed-echo onset {onset.map_km:.2f} km"))
+        ax.axvline(primary.map_km, color=C["map"], lw=2.2, alpha=0.95, zorder=6)
         ax.scatter([primary.map_km], [_surf_at(profile, sec, primary.map_km)],
-                   s=120, color=C["map"], marker="s", edgecolors="white", lw=1.6,
-                   zorder=7)
-        handles.append(Line2D([], [], color=C["map"], marker="s", lw=1.8,
-                              ls="--", mec="white", mew=1.2, ms=8,
-                              label=f"changepoint {primary.map_km:.2f} km"))
+                   s=180, color=C["map"], edgecolors="white", lw=1.8, zorder=7)
+        handles.append(Line2D([], [], color=C["map"], marker="o", lw=2.2,
+                              mec="white", mew=1.4, ms=10,
+                              label=f"grounding point (changepoint) "
+                                    f"{primary.map_km:.2f} km"))
         if front is not None and x0 <= front <= x1:
             handles.append(Line2D([], [], color=C["terminus"], lw=1.6, ls="-.",
                                   label=f"calving front {front:.2f} km"))
@@ -210,16 +238,21 @@ def plot_detection(profile: GlacierProfile,
             handles.append(Line2D([], [], color=C["terminus"], lw=1.0, ls=":",
                                   alpha=0.45,
                                   label=f"berg / other ice ({len(bergs)})"))
+        if bands:
+            handles.append(Patch(fc=C["gz"], ec="none", alpha=0.45,
+                                 label=f"InSAR GZ {gz_label}" if gz_label
+                                 else "InSAR GZ"))
         handles.append(Line2D([], [], color="black", lw=0.7, ls="--",
                               label="sea level"))
         ax.set_ylabel("Elevation (m WGS84)")
         _gmt_legend(ax, handles=handles)
-        ax.set_title(title or f"{profile.source}", fontsize=12, color="black",
-                     pad=16, fontweight="semibold")
-        _start_end_labels(ax)
+        # Title and end labels on the topmost panel, whichever that is.
+        axs[0].set_title(title or f"{profile.source}", fontsize=12,
+                         color="black", pad=16, fontweight="semibold")
+        _start_end_labels(axs[0])
 
         # -- flotation residual -------------------------------------------
-        ax = axs[1]
+        ax = panel["resid"]
         # The same quantity flotation_window used, not the 71.6 km
         # FlotationResidual feature: that cutoff exceeds a short leg's whole
         # length, so it collapses to the mean and draws a flat line that hides
@@ -236,7 +269,7 @@ def plot_detection(profile: GlacierProfile,
         _gmt_legend(ax)
 
         # -- bed power ------------------------------------------------------
-        ax = axs[2]
+        ax = panel["amp"]
         ax.plot(profile.x, profile.amp, color=C["muted"], lw=0.9, alpha=0.6,
                 label="Bed power")
         ax.plot(profile.x, _features.AmplitudeLevel().compute(profile),
@@ -249,8 +282,10 @@ def plot_detection(profile: GlacierProfile,
                        label=f"floating baseline {onset.extra['baseline_dB']:.1f} dB")
             ax.axhline(onset.extra["threshold_dB"], color=C["onset"], lw=1.1,
                        ls="--", label="onset threshold")
-            ax.axvline(onset.map_km, color=C["onset"], lw=2.2,
-                       label=f"onset {onset.map_km:.2f} km")
+            ax.axvline(onset.map_km, color=C["onset"], lw=1.6, ls=":",
+                       label=f"bed-echo onset {onset.map_km:.2f} km")
+        ax.axvline(primary.map_km, color=C["map"], lw=2.2, alpha=0.95,
+                   label=f"grounding point {primary.map_km:.2f} km")
         finite = profile.amp[vis][np.isfinite(profile.amp[vis])]
         if finite.size:
             ax.set_ylim(finite.min() - 3, finite.max() + 3)
@@ -269,7 +304,7 @@ def plot_detection(profile: GlacierProfile,
         _gmt_legend(ax)
 
         # -- posterior ------------------------------------------------------
-        ax = axs[3]
+        ax = panel["post"]
         for name, post in primary.extra.get("model_posteriors", {}).items():
             ax.plot(primary.x_km, post / post.max(),
                     color=MODEL_C.get(name, "#999"), lw=1.4, ls=":", alpha=0.85,
@@ -291,14 +326,79 @@ def plot_detection(profile: GlacierProfile,
         ax.set_xlabel("Along-track distance (km)")
         _gmt_legend(ax)
 
-        if gz:
-            axs[0].text(np.mean(gz), axs[0].get_ylim()[1], " InSAR GZ",
-                        ha="center", va="top", fontsize=9, color=C["gz"],
-                        fontweight="semibold", zorder=8)
+        if bands:
+            # Labelled once, on the crossing the pick is measured against.
+            geom = panel["geom"]
+            near = min(bands, key=lambda b: abs(np.mean(b) - primary.map_km))
+            geom.text(np.mean(near), geom.get_ylim()[1], " InSAR GZ",
+                      ha="center", va="top", fontsize=9, color=C["gz"],
+                      fontweight="semibold", zorder=8)
 
         fig.savefig(out_path, bbox_inches="tight", facecolor="white")
         plt.close(fig)
     return out_path
+
+
+def _gz_bands(gz) -> list:
+    """
+    Reference zones as a list of (lo_km, hi_km).
+
+    Accepts a single band, as the CLI's --gz_lo/--gz_hi give, or several, as a
+    track crossing the same zone twice does.
+    """
+    if gz is None or len(gz) == 0:
+        return []
+    if np.isscalar(gz[0]):
+        return [(float(gz[0]), float(gz[1]))]
+    return [(float(lo), float(hi)) for lo, hi in gz]
+
+
+def _draw_radargram(ax, rad, profile, vis, primary, onset):
+    """
+    Echo image with the layer picks and the detected changepoints over it.
+
+    The picks are the raw ones the detectors ran on, not the gap-bridged
+    section: the point of the panel is to show where the picker put them
+    against the return it put them on.
+    """
+    from matplotlib.lines import Line2D
+
+    vmin, vmax = rad.clim()
+    ax.imshow(rad.power, extent=rad.extent, origin="lower", aspect="auto",
+              cmap="gray", vmin=vmin, vmax=vmax, interpolation="nearest",
+              zorder=0)
+    # The grid would read as layering in the echo.
+    ax.grid(False)
+
+    handles = []
+    for values, colour, label in (
+        (profile.h_surf, RADAR_C["surf"], "surface pick"),
+        (profile.h_bed, RADAR_C["bed"], "bed pick"),
+    ):
+        ax.plot(profile.x, values, color=colour, lw=1.1, ls=":", zorder=6)
+        handles.append(Line2D([], [], color=colour, lw=1.4, ls=":", label=label))
+
+    if onset is not None:
+        ax.axvline(onset.map_km, color=C["onset"], lw=1.6, ls=":", alpha=0.9,
+                   zorder=6)
+        handles.append(Line2D([], [], color=C["onset"], lw=1.6, ls=":",
+                              label=f"bed-echo onset {onset.map_km:.2f} km"))
+    ax.axvline(primary.map_km, color=C["map"], lw=2.2, alpha=0.95, zorder=6)
+    handles.append(Line2D([], [], color=C["map"], lw=2.2,
+                          label=f"grounding point (changepoint) "
+                                f"{primary.map_km:.2f} km"))
+
+    # Clipped to the loaded grid: padding out past it would open a white band
+    # above the echo rather than showing more of it.
+    picks = np.concatenate([profile.h_bed[vis], profile.h_surf[vis]])
+    picks = picks[np.isfinite(picks)]
+    if picks.size:
+        _tight_ylim(ax, picks, picks)
+    lo, hi = ax.get_ylim()
+    ax.set_ylim(max(lo, float(rad.z[0])) if picks.size else float(rad.z[0]),
+                min(hi, float(rad.z[-1])) if picks.size else float(rad.z[-1]))
+    ax.set_ylabel("Elevation (m WGS84)")
+    _gmt_legend(ax, handles=handles)
 
 
 def _gmt_frame(ax):
