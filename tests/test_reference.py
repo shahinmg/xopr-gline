@@ -162,3 +162,26 @@ def test_the_datum_offset_matches_the_shelf_residual():
              - np.median(clean.flotation_residual[ice]))
     assert shift == pytest.approx(-29.3, abs=0.01)
     assert biased.sea_level_offset_m() == pytest.approx(shift, abs=0.01)
+
+
+# -- single-year surveys ---------------------------------------------------
+def test_a_single_year_file_name_gets_a_one_year_epoch():
+    """A TLS survey named for the year it was flown, e.g.
+    2018_grounding_zone_convex_hull.gpkg."""
+    start, end = _epoch("2018_grounding_zone_convex_hull")
+    assert (start.year, end.year) == (2018, 2018)
+
+
+def test_two_one_year_surveys_stay_separate():
+    """Unparsed they would share a NaT epoch and merge into one reference."""
+    zones = pd.concat([_zone(80.2, 80.25, "2018_gz"),
+                       _zone(80.2, 80.25, "2019_gz")], ignore_index=True)
+    for i, year in enumerate((2018, 2019)):
+        zones.loc[i, "epoch_start"] = pd.Timestamp(f"{year}-01-01")
+        zones.loc[i, "epoch_end"] = pd.Timestamp(f"{year}-12-31")
+    zones = gpd.GeoDataFrame(zones, geometry="geometry", crs="EPSG:4326")
+
+    assert zone_for_date(zones, pd.Timestamp("2017-04-22"))[
+        "zone_name"].tolist() == ["2018_gz"]
+    assert zone_for_date(zones, pd.Timestamp("2019-08-01"))[
+        "zone_name"].tolist() == ["2019_gz"]

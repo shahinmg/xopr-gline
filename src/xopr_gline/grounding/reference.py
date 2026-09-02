@@ -18,7 +18,7 @@ from shapely.ops import unary_union
 from .profile import GlacierProfile, _mask_runs
 
 # Epoch leading a file name, e.g. '2011_2015_gzone+iceshelf.shp'.
-_EPOCH = re.compile(r"^(\d{4})_(\d{4})")
+_EPOCH = re.compile(r"^(\d{4})(?:_(\d{4}))?")
 
 
 def load_zones(path: Union[str, Path], pattern: str = "*.shp") -> gpd.GeoDataFrame:
@@ -27,9 +27,9 @@ def load_zones(path: Union[str, Path], pattern: str = "*.shp") -> gpd.GeoDataFra
     directory.
 
     Each row keeps the file it came from and the epoch parsed from its name, so
-    `zone_for_date` can pick the survey nearest a flight. Files whose name
-    carries no leading YYYY_YYYY get NaT epochs and are only ever selected when
-    nothing else is available.
+    `zone_for_date` can pick the survey nearest a flight. A name leading with
+    YYYY_YYYY or a single YYYY carries an epoch; anything else gets NaT and is
+    only ever selected when nothing else is available.
     """
     path = Path(path)
     files = sorted(p for p in path.glob(pattern)
@@ -131,12 +131,17 @@ def offset_from_zone_km(profile: GlacierProfile, x_km: float,
 
 # -- helpers --------------------------------------------------------------
 def _epoch(stem: str) -> tuple:
-    """(start, end) timestamps from a leading YYYY_YYYY, or (NaT, NaT)."""
+    """
+    (start, end) timestamps from a leading YYYY_YYYY or YYYY, else (NaT, NaT).
+
+    A single year is a one-year epoch, so a survey named for the year it was
+    flown matches dates the same way a multi-year one does.
+    """
     m = _EPOCH.match(stem)
     if not m:
         return (pd.NaT, pd.NaT)
     return (pd.Timestamp(year=int(m.group(1)), month=1, day=1),
-            pd.Timestamp(year=int(m.group(2)), month=12, day=31))
+            pd.Timestamp(year=int(m.group(2) or m.group(1)), month=12, day=31))
 
 
 def _epoch_gap(start, end, date) -> float:
