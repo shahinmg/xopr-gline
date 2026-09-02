@@ -88,7 +88,8 @@ def plot_detection(profile: GlacierProfile,
                    project_bathymetry: bool = True,
                    bathymetry=None,
                    radargram=None,
-                   gz_label: Optional[str] = None):
+                   gz_label: Optional[str] = None,
+                   features: Optional[Sequence] = None):
     """
     Geometry, the flotation residual that set the window, bed power, and the
     posterior, under an optional radargram.
@@ -103,6 +104,10 @@ def plot_detection(profile: GlacierProfile,
 
     gz shades a reference grounding zone: one (lo_km, hi_km) band or several.
     gz_label names it in the legend, e.g. the survey epoch '2011-2015'.
+
+    features is the channel set the detector was given, so the bed-power panel
+    draws what it actually read. Without it the panel falls back to the shipped
+    cutoff, which misrepresents any run that was tuned away from it.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -272,8 +277,9 @@ def plot_detection(profile: GlacierProfile,
         ax = panel["amp"]
         ax.plot(profile.x, profile.amp, color=C["muted"], lw=0.9, alpha=0.6,
                 label="Bed power")
-        ax.plot(profile.x, _features.AmplitudeLevel().compute(profile),
-                color=C["amp"], lw=1.9, label="Filtered")
+        amp_feature = _amp_feature(features)
+        ax.plot(profile.x, amp_feature.compute(profile),
+                color=C["amp"], lw=1.9, label=_amp_label(amp_feature))
         for gap_lo, gap_hi in profile.nan_blocks():
             ax.axvspan(gap_lo, gap_hi, color="gray", alpha=0.16, zorder=0)
         if onset is not None:
@@ -422,6 +428,25 @@ def _gmt_legend(ax, handles=None):
         ax.legend(**kw)
     else:
         ax.legend(handles=handles, **kw)
+
+
+def _amp_feature(features):
+    """The bed-power channel the detector was given, or the shipped default."""
+    for f in features or ():
+        if getattr(f, "name", None) == "amp":
+            return f
+    return _features.AmplitudeLevel()
+
+
+def _amp_label(feature) -> str:
+    """Name the bed-power curve by what was actually done to it."""
+    cutoff = getattr(getattr(feature, "filt", None), "wavelength_km", None)
+    despike = getattr(feature, "despike_km", 0.0)
+    parts = []
+    if despike:
+        parts.append(f"despiked {despike:g} km")
+    parts.append(f"{cutoff:g} km low-pass" if cutoff else "no low-pass")
+    return ", ".join(parts).capitalize()
 
 
 def _start_end_labels(ax, start="A", end="B"):
