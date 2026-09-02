@@ -74,6 +74,14 @@ def main():
                    help="tanh scale for the flotation residual channel, so the "
                         "inland ramp cannot dominate. 0 disables")
     p.add_argument("--geoid", default="data/bedmachine/BedMachineGreenland-v5.nc")
+    p.add_argument("--datum_correct", action="store_true",
+                   help="fold each flight's open-water elevation offset into "
+                        "the geoid separation. 2017_Greenland_P3 reads -29 m "
+                        "on Petermann, and every flotation quantity carries "
+                        "it. A line with no open water in range is left alone")
+    p.add_argument("--radargram", action="store_true",
+                   help="add the echogram panel to each figure, so a pick can "
+                        "be judged against the bed return it came from")
     p.add_argument("--fig_dir", default=None,
                    help="write a four-panel figure per grounding point here, "
                         "named by run_id. Drawing is serialised, so expect it "
@@ -122,7 +130,9 @@ def main():
                        amp_cutoff_km=args.amp_cutoff_km,
                        elev_cutoff_km=args.elev_cutoff_km,
                        saturate_m=args.saturate_m,
-                       screen=not args.no_screen, fig_dir=args.fig_dir)
+                       screen=not args.no_screen, fig_dir=args.fig_dir,
+                       datum_correct=args.datum_correct,
+                       radargram=args.radargram)
 
     print("\n" + points["status"].value_counts().to_string())
     gpkg = Path(args.gpkg) if args.gpkg else out.with_suffix(".gpkg")

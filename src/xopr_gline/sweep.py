@@ -35,7 +35,8 @@ import xopr.opr_access
 from .grounding import (BOCPDDetector, GlacierProfile, GradientDetector,
                         OnsetDetector, screen_profile, select_flotation_leg,
                         transition_width_km)
-from .grounding.features import (AMP_CUTOFF_KM, ELEV_CUTOFF_KM, SATURATE_M,
+from .grounding.features import (AMP_CUTOFF_KM, ELEV_CUTOFF_KM,
+                                 ROUGH_WINDOW_KM, SATURATE_M, all_features,
                                  default_features)
 from .grounding.geoid import DEFAULT_BEDMACHINE
 
@@ -152,6 +153,43 @@ def build_tasks(frames: Optional[pd.DataFrame] = None,
     return tasks.sort_values("run_id").reset_index(drop=True)
 
 
+def tasks_from_points(path) -> pd.DataFrame:
+    """
+    Task rows rebuilt from a previous sweep's output, gpkg or jsonl.
+
+    Reruns exactly the frames a curated result set was produced from, so a
+    tuning run is comparable to the sweep it came from rather than to whatever
+    the vetted lines cluster into today.
+    """
+    path = Path(path)
+    if path.suffix == ".gpkg":
+        points = gpd.read_file(path)
+    else:
+        points = pd.DataFrame(_read_jsonl(path))
+    if "status" in points:
+        points = points[points["status"] == "ok"]
+
+    missing = {"segment", "frames_requested"} - set(points.columns)
+    if missing:
+        raise ValueError(f"{path} has no {sorted(missing)} column")
+
+    rows = []
+    for segment, group in points.groupby("segment"):
+        spans = sorted({str(t) for t in group["frames_requested"].dropna()})
+        for i, text in enumerate(spans, 1):
+            first = group[group["frames_requested"].astype(str) == text].iloc[0]
+            frames = _parse_frames(text)
+            rows.append({
+                "run_id": f"{segment}#{i}",
+                "segment": segment,
+                "vetted_frames": frames,
+                "frames": frames,
+                "date": pd.to_datetime(first.get("date"), errors="coerce"),
+                "collection": first.get("collection"),
+            })
+    return pd.DataFrame(rows).sort_values("run_id").reset_index(drop=True)
+
+
 def _clusters(numbers: Sequence[int], max_gap: int = 1) -> list:
     """Split frame numbers wherever they jump by more than max_gap."""
     groups = [[numbers[0]]]
@@ -189,6 +227,10 @@ def run_segment(collection: Optional[str], segment: str,
                 amp_cutoff_km: float = AMP_CUTOFF_KM,
                 elev_cutoff_km: float = ELEV_CUTOFF_KM,
                 saturate_m: float = SATURATE_M,
+                rough_window_km: float = ROUGH_WINDOW_KM,
+                da_cutoff_km: Optional[float] = None,
+                despike_km: float = 0.0,
+                models: Optional[Sequence[str]] = None,
                 fig_dir=None,
                 bathymetry=None,
                 radargram: bool = False,
@@ -213,7 +255,10 @@ def run_segment(collection: Optional[str], segment: str,
            "margin_km": margin_km, "dx_km": dx_km, "pad_km": pad_km,
            "headline": headline, "snap_to_terminus": snap_to_terminus,
            "amp_cutoff_km": amp_cutoff_km, "elev_cutoff_km": elev_cutoff_km,
-           "saturate_m": saturate_m, "resample_interval": resample_interval,
+           "saturate_m": saturate_m, "rough_window_km": rough_window_km,
+           "da_cutoff_km": da_cutoff_km, "despike_km": despike_km,
+           "models": None if models is None else ",".join(models),
+           "resample_interval": resample_interval,
            "datum_correct": datum_correct, "crop_features": crop_features,
            "status": "error", "reason": "", **extra}
     if not collection or (isinstance(collection, float) and np.isnan(collection)):
@@ -301,17 +346,22 @@ def run_segment(collection: Optional[str], segment: str,
     except ValueError:
         row["flotation_crossing_km"] = np.nan
 
-    features = default_features(amp_cutoff_km, elev_cutoff_km, saturate_m)
-    by_name = {f.name: f for f in features}
+    features = default_features(amp_cutoff_km, elev_cutoff_km, saturate_m,
+                                da_cutoff_km, despike_km)
+    # What can be selected by name is wider than the default set: the roughness
+    # channels are opt-in, so no existing result changes.
+    catalogue = {f.name: f for f in
+                 all_features(amp_cutoff_km, elev_cutoff_km, saturate_m,
+                              rough_window_km, da_cutoff_km, despike_km)}
     if channels is not None:
-        unknown = [c for c in channels if c not in by_name]
+        unknown = [c for c in channels if c not in catalogue]
         if unknown:
             row["status"] = "bad_channels"
             row["reason"] = (f"unknown channels {unknown}; "
-                             f"have {sorted(by_name)}")
+                             f"have {sorted(catalogue)}")
             return row
-        features = tuple(by_name[c] for c in channels)
-        by_name = {f.name: f for f in features}
+        features = tuple(catalogue[c] for c in channels)
+    by_name = {f.name: f for f in features}
     row["channels"] = ",".join(f.name for f in features)
 
     # Onset and gradient each read one specific channel, and BOCPD's primary is
@@ -321,9 +371,11 @@ def run_segment(collection: Optional[str], segment: str,
     detectors = []
     if "amp" in by_name:
         detectors.append(("onset", OnsetDetector(feature=by_name["amp"])))
+    bocpd_kwargs = {} if models is None else {"models": tuple(models)}
     detectors.append(("bocpd", BOCPDDetector(
         features=features, pad_km=pad_km,
-        primary="dfree" if "dfree" in by_name else features[0].name)))
+        primary="dfree" if "dfree" in by_name else features[0].name,
+        **bocpd_kwargs)))
     if "dA" in by_name:
         detectors.append(("gradient", GradientDetector(feature=by_name["dA"])))
 
@@ -378,7 +430,7 @@ def run_segment(collection: Optional[str], segment: str,
                                  bathymetry if bathymetry is not None else geoid,
                                  opr=opr, radargram=radargram,
                                  resample_interval=resample_interval, gz=bands,
-                                 gz_label=gz_label))
+                                 gz_label=gz_label, features=features))
     return row
 
 
@@ -416,7 +468,7 @@ def _gz_fields(profile, pick, bands, reference, zone) -> dict:
 
 def _write_figure(profile, results, fig_dir, name, bathymetry, opr=None,
                   radargram=False, resample_interval="2s", gz=None,
-                  gz_label=None) -> dict:
+                  gz_label=None, features=None) -> dict:
     """
     Write the detection figure for one run.
 
@@ -446,7 +498,8 @@ def _write_figure(profile, results, fig_dir, name, bathymetry, opr=None,
     try:
         with _PLOT_LOCK:
             plot_detection(profile, ordered, str(path), bathymetry=bathymetry,
-                           radargram=echo, gz=gz, gz_label=gz_label)
+                           radargram=echo, gz=gz, gz_label=gz_label,
+                           features=features)
     except Exception as exc:
         return {**row, "figure_reason": _reason(exc)}
     return {**row, "figure": str(path)}
@@ -657,6 +710,17 @@ def _frames_text(frames) -> Optional[str]:
     return f"{min(frames):03d}-{max(frames):03d}" if frames else None
 
 
+def _parse_frames(text) -> Optional[list]:
+    """Inverse of _frames_text: "004-006" -> [4, 5, 6]."""
+    if text is None or (isinstance(text, float) and np.isnan(text)):
+        return None
+    text = str(text).strip()
+    if not text:
+        return None
+    lo, _, hi = text.partition("-")
+    return list(range(int(lo), int(hi or lo) + 1))
+
+
 def _reason(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"[:300]
 
@@ -728,6 +792,36 @@ def _result_fields(pick, results, profile) -> dict:
     }
 
 
+def _flotation_fields(pick, profile, near_km: float = 1.0,
+                      seaward_km: float = 5.0) -> dict:
+    """
+    How far the ice at the pick sits above hydrostatic flotation, in m.
+
+    A laterally buttressed outlet is held above free flotation by side drag and
+    never reaches zero: Helheim reads ~+43 m at the pick against ~0 m a few km
+    seaward, where Petermann's wide tongue reads ~0 m at both. `dfree` assumes
+    local hydrostatic equilibrium, so this says whether that assumption held.
+    """
+    residual = profile.flotation_residual
+    usable = profile.ice_mask() & np.isfinite(residual)
+    offset = (profile.x - pick.map_km) * profile.landward_sign()
+
+    near = usable & (np.abs(profile.x - pick.map_km) <= near_km)
+    # Seaward of the pick but off the transition itself, so it samples ice that
+    # has relaxed rather than the ramp the pick sits on.
+    free = usable & (offset <= -near_km) & (offset >= -seaward_km)
+
+    at_pick = float(np.median(residual[near])) if near.any() else np.nan
+    floating = float(np.median(residual[free])) if free.any() else np.nan
+    return {
+        "res_at_pick_m": at_pick,
+        "res_seaward_m": floating,
+        # The buttressing signature: how far above its own floating level the
+        # ice sits at the pick, which is comparable between glaciers.
+        "res_offset_m": at_pick - floating,
+    }
+
+
 def _qc_fields(pick, results, profile, snapped: bool = False) -> dict:
     """
     Flags that say how much to trust the row, so the output can be filtered.
@@ -772,6 +866,7 @@ def _qc_fields(pick, results, profile, snapped: bool = False) -> dict:
         "onset_upflow": bool(("onset" in results and "bocpd" in results)
                              and _transition(results, profile) < 0),
         "snapped_to_terminus": bool(snapped),
+        **_flotation_fields(pick, profile),
     }
     fields["confidence"] = _confidence(fields)
     return fields

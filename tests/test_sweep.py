@@ -3,13 +3,18 @@ Tests for the segment sweep: task building and the never-raises contract.
 """
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from xopr_gline.sweep import (_clusters, _pad, run_segment, to_geodataframe,
+from xopr_gline.sweep import (_clusters, _frames_text, _pad, _parse_frames,
+                              run_segment, tasks_from_points, to_geodataframe,
                               useable_frames)
+
+HELHEIM = Path("/home/laserglaciers/igs_2026/"
+               "greenland_v6_bocpd_cleaned_terminus_gap_helheim.gpkg")
 
 
 def test_clusters_split_on_a_frame_gap():
@@ -70,3 +75,69 @@ def test_to_geodataframe_places_the_point():
                           "lat": 80.5, "lon": -60.0}])
     point = to_geodataframe(rows).geometry.iloc[0]
     assert (point.x, point.y) == (-60.0, 80.5)
+
+
+# -- rerunning an earlier sweep's frames -----------------------------------
+def test_frame_spans_round_trip():
+    """tasks_from_points reads back exactly what _frames_text wrote."""
+    for text in ("004-006", "001-002", "041-044", "015-016"):
+        assert _frames_text(_parse_frames(text)) == text
+    assert _parse_frames("007") == [7]
+    assert _parse_frames(None) is None
+    assert _parse_frames("") is None
+
+
+@pytest.mark.skipif(not HELHEIM.exists(), reason="helheim gpkg not present")
+def test_tasks_from_points_reruns_the_frames_of_an_earlier_sweep():
+    """A curated result set drives the same runs it was produced from."""
+    tasks = tasks_from_points(HELHEIM)
+    assert len(tasks) == 9
+    assert tasks["segment"].nunique() == 7
+    # run_ids are numbered per segment, as build_tasks does
+    assert set(tasks[tasks["segment"] == "20080730_01"]["run_id"]) == {
+        "20080730_01#1", "20080730_01#2"}
+    assert tasks[tasks["run_id"] == "20080730_01#1"]["frames"].iloc[0] == [4, 5, 6]
+    assert tasks["collection"].notna().all()
+
+
+# -- buttressing diagnostic ------------------------------------------------
+def _shelf(pedestal_m, n=240, dx=0.25, x_gl=30.0, thickness=800.0):
+    """
+    A shelf at flotation seaward of x_gl, held pedestal_m above it inland.
+
+    x increases landward, so landward_sign() is +1 and the seaward window is
+    the low-x side.
+    """
+    from xopr_gline.constants import DEFAULT_CONSTANTS
+    from xopr_gline.grounding.profile import GlacierProfile
+
+    x = np.arange(n) * dx
+    residual = np.where(x >= x_gl, pedestal_m, 0.0)
+    surf_msl = thickness * DEFAULT_CONSTANTS.flotation_factor + residual
+    return GlacierProfile(x=x, amp=np.full(n, -110.0),
+                          h_surf=surf_msl, h_bed=surf_msl - thickness,
+                          geoid_separation_m=0.0)
+
+
+class _Pick:
+    def __init__(self, km):
+        self.map_km = km
+
+
+def test_a_buttressed_pick_reads_above_its_floating_level():
+    """Helheim sits ~43 m above free flotation at the pick, ~0 m seaward."""
+    from xopr_gline.sweep import _flotation_fields
+
+    p = _shelf(pedestal_m=40.0)
+    f = _flotation_fields(_Pick(32.0), p)          # 2 km inland of the step
+    assert f["res_at_pick_m"] == pytest.approx(40.0, abs=0.5)
+    assert f["res_seaward_m"] == pytest.approx(0.0, abs=0.5)
+    assert f["res_offset_m"] == pytest.approx(40.0, abs=1.0)
+
+
+def test_a_freely_floating_pick_reads_no_offset():
+    """Petermann's wide tongue is at flotation on both sides of the pick."""
+    from xopr_gline.sweep import _flotation_fields
+
+    f = _flotation_fields(_Pick(32.0), _shelf(pedestal_m=0.0))
+    assert f["res_offset_m"] == pytest.approx(0.0, abs=0.5)
