@@ -23,6 +23,11 @@ from ..constants import DEFAULT_CONSTANTS, PhysicalConstants
 from ..xopr_utils import surface_bed_reflection_power
 from .geoid import resolve_geoid
 
+# Fractional departure from the median sample spacing that still counts as a
+# uniform grid. np.arange lands well inside this; a track built from cumulative
+# GPS distance does not.
+UNIFORM_TOL = 0.01
+
 
 @dataclass(frozen=True)
 class FrameSpan:
@@ -115,6 +120,11 @@ class GlacierProfile:
 
     source: ProfileSource or None
         Provenance, set by from_xopr.
+
+    surf_amp: np.ndarray or None
+        Surface echo power in dB on the same grid as `amp`. Optional: profiles
+        built from arrays or CSVs do not have it. `amp - surf_amp` is a relative
+        bed power, which cancels per-flight system gain and aircraft altitude.
     """
 
     x: np.ndarray
@@ -126,6 +136,7 @@ class GlacierProfile:
     lat: Optional[np.ndarray] = None
     lon: Optional[np.ndarray] = None
     source: Optional[ProfileSource] = None
+    surf_amp: Optional[np.ndarray] = None
 
     def __post_init__(self):
         n = len(self.x)
@@ -136,9 +147,21 @@ class GlacierProfile:
                 )
         if n < 2:
             raise ValueError("profile needs at least 2 samples")
-        if not np.all(np.diff(self.x) > 0):
+        steps = np.diff(self.x)
+        if not np.all(steps > 0):
             raise ValueError("x must be strictly increasing")
-        for name in ("lat", "lon"):
+        # Every filter, gradient and rolling window downstream assumes uniform
+        # spacing and none of them check. A near-duplicate sample does not fail
+        # loudly, it makes np.gradient spike by four orders of magnitude.
+        dx = float(np.median(steps))
+        worst = int(np.argmax(np.abs(steps - dx)))
+        if abs(steps[worst] - dx) > UNIFORM_TOL * dx:
+            raise ValueError(
+                f"x must be uniformly spaced: median dx is {dx:.6g} km but "
+                f"x[{worst + 1}] - x[{worst}] is {steps[worst]:.6g} km. "
+                f"Regrid onto np.arange first; from_xopr already does."
+            )
+        for name in ("lat", "lon", "surf_amp"):
             v = getattr(self, name)
             if v is not None and len(v) != n:
                 raise ValueError(f"{name} has length {len(v)}, expected {n}")
@@ -251,6 +274,7 @@ class GlacierProfile:
             lat=None if self.lat is None else self.lat[sel],
             lon=None if self.lon is None else self.lon[sel],
             source=self.source,
+            surf_amp=None if self.surf_amp is None else self.surf_amp[sel],
         )
 
     def smoothed_residual(self, smooth_km: float = 5.0) -> np.ndarray:
@@ -563,7 +587,8 @@ class GlacierProfile:
         x_elev, h_surf, h_bed, x_track, lat_t, lon_t, spans = _load_elevations(
             opr, stac_items
         )
-        x_amp, amp = _load_bed_power(opr, stac_items, resample_interval)
+        x_amp, amp, surf_amp = _load_bed_power(opr, stac_items,
+                                               resample_interval)
 
         if dx_km is None:
             dx_km = float(np.median(np.diff(x_amp)))
@@ -584,6 +609,7 @@ class GlacierProfile:
         return cls(
             x=x,
             amp=_regrid_preserving_gaps(x_amp, amp, x, gap_tol_km=gap_tol_km),
+            surf_amp=_regrid_preserving_gaps(x_amp, surf_amp, x, gap_tol_km),
             h_surf=_regrid_preserving_gaps(x_elev, h_surf, x, gap_tol_km),
             h_bed=_regrid_preserving_gaps(x_elev, h_bed, x, gap_tol_km),
             constants=constants,
@@ -792,11 +818,14 @@ def _load_bed_power(opr, stac_items, resample_interval="2s"):
 
     x_km = merged["along_track"].values / 1000.0
     amp = merged["bed_power_dB"].values
+    # The surface return, kept as the reference a relative bed power needs:
+    # dividing by it cancels per-flight system gain and aircraft altitude.
+    surf = merged["surface_power_dB"].values
 
     order = np.argsort(x_km)
-    x_km, amp = x_km[order], amp[order]
+    x_km, amp, surf = x_km[order], amp[order], surf[order]
     keep = np.isfinite(x_km) & np.concatenate([[True], np.diff(x_km) > 0])
-    return x_km[keep], amp[keep]
+    return x_km[keep], amp[keep], surf[keep]
 
 
 def _regrid_preserving_gaps(x_src, values, x_dst, gap_tol_km):
