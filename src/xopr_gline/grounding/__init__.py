@@ -7,6 +7,9 @@ from .detectors import Detector as Detector
 from .detectors import GradientDetector as GradientDetector
 from .detectors import OnsetDetector as OnsetDetector
 from .features import DEFAULT_FEATURES as DEFAULT_FEATURES
+from .features import AmplitudeRoughness as AmplitudeRoughness
+from .features import BedRoughness as BedRoughness
+from .features import all_features as all_features
 from .flow import FlowAlignment as FlowAlignment
 from .flow import assess_alignment as assess_alignment
 from .flow import along_flow_runs as along_flow_runs

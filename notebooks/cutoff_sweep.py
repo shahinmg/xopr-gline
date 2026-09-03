@@ -106,6 +106,12 @@ def main():
                    help="shared xOPR download cache. Strongly recommended: "
                         "without it every cutoff refetches the same frames")
     p.add_argument("--margin_km", type=float, default=12.0)
+    p.add_argument("--hab_tolerance_m", type=float, default=50.0,
+                   help="closest approach to flotation, m, that still counts "
+                        "as ice worth detecting on. Above it the segment is "
+                        "screened out as 'never near flotation'. Pass a huge "
+                        "value to disable the gate and keep grounded-throughout "
+                        "segments in the output")
     p.add_argument("--dx_km", type=float, default=DEFAULT_DX_KM)
     p.add_argument("--pad_km", type=float, default=4.0)
     p.add_argument("--workers", type=int, default=4)
@@ -156,7 +162,8 @@ def main():
             geoid="data/bedmachine/BedMachineGreenland-v5.nc",
             margin_km=args.margin_km, dx_km=args.dx_km, pad_km=args.pad_km,
             headline="bocpd", snap_to_terminus=False,
-            screen=True, fig_dir=fig_dir,
+            screen=True, hab_tolerance_m=args.hab_tolerance_m,
+            fig_dir=fig_dir,
             datum_correct=True, radargram=not args.no_figs,
             crop_features=False,
             reference=args.reference, reference_pattern=args.reference_pattern,
@@ -201,19 +208,16 @@ def load_baseline(path):
 
 
 def summarise(found: gpd.GeoDataFrame, cutoff: float, baseline=None) -> dict:
-    """One row per cutoff: how the picks sit against the zone, the baseline
-    and each other."""
+    """
+    One row per cutoff: how the picks sit against the baseline and each other.
+
+    Deliberately zone-free. A reference grounding zone is a different
+    measurement from a different year, so scoring a cutoff on it lets the zone
+    choose the detector's settings through whoever reads the table.
+    """
     from xopr_gline.validate import attach_glacier_ids, repeat_consistency
 
     row = {"n": len(found)}
-
-    off = pd.to_numeric(found.get("gz_offset_km"), errors="coerce") \
-        if "gz_offset_km" in found else pd.Series(dtype=float)
-    if off.notna().any():
-        row.update(n_with_zone=int(off.notna().sum()),
-                   in_zone=int((off == 0).sum()),
-                   median_gz_offset_km=float(off.abs().median()),
-                   p90_gz_offset_km=float(off.abs().quantile(0.9)))
 
     if baseline is not None:
         key = (found["segment"].astype(str) + "/"

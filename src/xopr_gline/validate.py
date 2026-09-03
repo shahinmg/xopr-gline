@@ -8,6 +8,10 @@ within a cluster measures the method. The other compares against a supplied
 reference such as an InSAR grounding zone, which is a different measurement of
 a different thing rather than truth: expect the radar grounding point slightly
 downflow of the InSAR limit of tidal flexure.
+
+Reference zones are for drawing and for reporting one-off, never for choosing
+settings: `scoreboard` deliberately omits them, so a zone surveyed years from
+the flight cannot vote on a cutoff.
 """
 
 from pathlib import Path
@@ -159,8 +163,10 @@ def scoreboard(points: gpd.GeoDataFrame) -> pd.Series:
         "confidence_high": fraction("confidence", "high"),
         "confidence_low": fraction("confidence", "low"),
     }
-    for column in ("detector_spread_km", "bocpd_model_spread_km",
-                   "reference_distance_km"):
+    # No reference distance here on purpose. The scoreboard is what settings
+    # get chosen on, and a zone from another year choosing them is the same
+    # leak as the detector reading it, one step removed.
+    for column in ("detector_spread_km", "bocpd_model_spread_km"):
         if column in found:
             numbers[f"median_{column}"] = float(found[column].median())
 
