@@ -221,6 +221,7 @@ def run_segment(collection: Optional[str], segment: str,
                 margin_km: float = 12.0,
                 auto_leg: bool = True,
                 screen: bool = True,
+                hab_tolerance_m: float = 50.0,
                 headline: str = "bocpd",
                 pad_km: float = 4.0,
                 snap_to_terminus: bool = False,
@@ -253,6 +254,7 @@ def run_segment(collection: Optional[str], segment: str,
     row = {"collection": collection, "segment": segment,
            "frames_requested": _frames_text(frames),
            "margin_km": margin_km, "dx_km": dx_km, "pad_km": pad_km,
+           "hab_tolerance_m": hab_tolerance_m,
            "headline": headline, "snap_to_terminus": snap_to_terminus,
            "amp_cutoff_km": amp_cutoff_km, "elev_cutoff_km": elev_cutoff_km,
            "saturate_m": saturate_m, "rough_window_km": rough_window_km,
@@ -297,7 +299,8 @@ def run_segment(collection: Optional[str], segment: str,
     leg = None
     if screen:
         try:
-            verdict = screen_profile(profile, margin_km=margin_km)
+            verdict = screen_profile(profile, margin_km=margin_km,
+                                     hab_tolerance_m=hab_tolerance_m)
         except Exception as exc:
             row["status"] = "screen_failed"
             row["reason"] = _reason(exc)
@@ -403,8 +406,13 @@ def run_segment(collection: Optional[str], segment: str,
     # Snap first so the confidence knows about it, apply after so it overrides
     # the position the detector reported.
     snapped = _snap_to_terminus(pick, profile, snap=snap_to_terminus)
+    # From the searched stretch, like plot_detection: a segment that turns fits
+    # a whole-profile sign pointing the wrong way, which put res_seaward_m on
+    # the landward side and read 20080730_01 frames 15-16 as 91 m below its own
+    # floating level.
     row.update(_qc_fields(pick, results, profile,
-                          snapped=snapped["snapped_to_terminus"]))
+                          snapped=snapped["snapped_to_terminus"],
+                          sign=profile.landward_sign(window=window)))
     row.update(snapped)
     row["status"] = "ok"
 
@@ -793,7 +801,7 @@ def _result_fields(pick, results, profile) -> dict:
 
 
 def _flotation_fields(pick, profile, near_km: float = 1.0,
-                      seaward_km: float = 5.0) -> dict:
+                      seaward_km: float = 5.0, sign=None) -> dict:
     """
     How far the ice at the pick sits above hydrostatic flotation, in m.
 
@@ -804,7 +812,9 @@ def _flotation_fields(pick, profile, near_km: float = 1.0,
     """
     residual = profile.flotation_residual
     usable = profile.ice_mask() & np.isfinite(residual)
-    offset = (profile.x - pick.map_km) * profile.landward_sign()
+    if sign is None:
+        sign = profile.landward_sign()
+    offset = (profile.x - pick.map_km) * sign
 
     near = usable & (np.abs(profile.x - pick.map_km) <= near_km)
     # Seaward of the pick but off the transition itself, so it samples ice that
@@ -822,13 +832,18 @@ def _flotation_fields(pick, profile, near_km: float = 1.0,
     }
 
 
-def _qc_fields(pick, results, profile, snapped: bool = False) -> dict:
+def _qc_fields(pick, results, profile, snapped: bool = False, sign=None) -> dict:
     """
     Flags that say how much to trust the row, so the output can be filtered.
 
     The first Greenland sweep had no way to separate a real detection from a
     boundary artifact, which is what made a table of 99 "ok" rows unusable.
+
+    `sign` is the local orientation, from the leg the window came from. The
+    whole-profile one points the wrong way on a segment that turns.
     """
+    if sign is None:
+        sign = profile.landward_sign()
     picks = {k: v.map_km for k, v in results.items()}
     models = (results["bocpd"].extra.get("model_maps", {})
               if "bocpd" in results else {})
@@ -838,11 +853,16 @@ def _qc_fields(pick, results, profile, snapped: bool = False) -> dict:
     # bergs in the fjord each make a crossing, and a pick sitting 2 km inland of
     # the front read as 0.2 km from a berg drifting past it. What is wanted is
     # the changepoint of upflow ice relative to the terminus.
-    front = profile.calving_front_km()
+    # Scanned from the searched stretch, not from the profile's end: on a
+    # segment that turns, "the landward end" is the far side and the first
+    # crossing met from there is whatever gap in the bed pick comes first. Not
+    # from the pick either, which can sit a hair seaward of the front it is
+    # measured against and would then exclude it.
+    front = profile.calving_front_km(_scan_from(pick, sign), sign=sign)
     gap = abs(pick.map_km - front) if front is not None else np.nan
     # Signed, so a pick beyond the front is distinguishable from one inland of
     # it. Positive is inland, which is the only side a grounding point can be.
-    offset = ((pick.map_km - front) * profile.landward_sign()
+    offset = ((pick.map_km - front) * sign
               if front is not None else np.nan)
     # A pick displaced off the terminus by the trim is still a pick at the
     # terminus, so the tolerance grows to whatever the trim could have moved it.
@@ -864,12 +884,20 @@ def _qc_fields(pick, results, profile, snapped: bool = False) -> dict:
         "posterior_entropy": pick.posterior_entropy,
         "ci95_width_km": ci95[1] - ci95[0],
         "onset_upflow": bool(("onset" in results and "bocpd" in results)
-                             and _transition(results, profile) < 0),
+                             and _transition(results, profile, sign) < 0),
         "snapped_to_terminus": bool(snapped),
-        **_flotation_fields(pick, profile),
+        **_flotation_fields(pick, profile, sign=sign),
     }
     fields["confidence"] = _confidence(fields)
     return fields
+
+
+def _scan_from(pick, sign):
+    """Landward edge of the search window, the origin for the front scan."""
+    window = getattr(pick, "search_window", None)
+    if window is None:
+        return None
+    return window[0] if sign < 0 else window[1]
 
 
 def _snap_to_terminus(pick, profile, snap: bool = True,
@@ -966,10 +994,11 @@ def _confidence(qc: dict) -> str:
     return "high"
 
 
-def _transition(results, profile) -> float:
+def _transition(results, profile, sign=None) -> float:
     try:
-        return transition_width_km(results["onset"], results["bocpd"],
-                                   profile.landward_sign())
+        if sign is None:
+            sign = profile.landward_sign()
+        return transition_width_km(results["onset"], results["bocpd"], sign)
     except Exception:
         return np.nan
 

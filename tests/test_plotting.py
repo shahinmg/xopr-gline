@@ -214,3 +214,67 @@ def test_the_vertical_pad_values_are_not_drawn_as_echo():
     power[np.isin(power, _PAD_VALUES)] = np.nan
     assert np.isnan(power).sum() == 3
     assert np.nanmin(power) == 3.0
+
+
+def _turning_profile(dx=0.25):
+    """
+    A seaward glacier reached across a long inland run whose residual rises.
+
+    The whole-profile residual trend then points landward while the stretch
+    being analysed runs seaward, which is 20080730_01 frames 15-16.
+    """
+    seaward = _profile(dx=dx, n=160)
+    n_in = 480
+    x_in = np.arange(n_in) * dx
+    h = np.linspace(400.0, 1400.0, n_in)
+    bed_msl = np.full(n_in, -300.0)
+    surf_msl = bed_msl + h
+
+    x = np.concatenate([x_in, x_in[-1] + dx + seaward.x])
+    h_surf = np.concatenate([surf_msl + GEOID, seaward.h_surf])
+    h_bed = np.concatenate([bed_msl + GEOID, seaward.h_bed])
+    amp = np.concatenate([np.full(n_in, -110.0), seaward.amp])
+    return GlacierProfile(x=x, amp=amp, h_surf=h_surf, h_bed=h_bed,
+                          geoid_separation_m=GEOID), x_in[-1] + dx
+
+
+def test_landward_sign_is_local_when_given_a_window():
+    """One line over a segment that turns points whichever arm is longer."""
+    profile, junction = _turning_profile()
+
+    assert profile.landward_sign() == 1
+    assert profile.landward_sign(window=(junction, profile.x[-1])) == -1
+    assert profile.landward_sign(window=(0.0, junction)) == 1
+
+
+def test_the_section_does_not_bridge_a_bottom_it_actually_picked():
+    """
+    The hatch that covered 7.75 km of picked bed on 20080730_01 frames 15-16.
+
+    A sign fitted over the whole segment ran _hold_front_bottom in from the
+    wrong end, so it held a front bottom inland and marked every sample it
+    crossed as made up, real picks included.
+    """
+    profile, junction = _turning_profile()
+    gp_km = junction + 30.0
+    window = (junction, profile.x[-1])
+
+    wrong = _build_section(profile, gp_km, SEA_LEVEL, None, floor=-1500.0,
+                           sign=profile.landward_sign())
+    right = _build_section(profile, gp_km, SEA_LEVEL, None, floor=-1500.0,
+                           sign=profile.landward_sign(window=window))
+
+    picked = np.isfinite(profile.h_bed)
+    assert wrong.base_bridged[picked].sum() > 20
+    assert not right.base_bridged[picked & (profile.x < gp_km)].any()
+
+
+def test_the_grounded_side_follows_the_local_orientation():
+    """Ocean was drawn under the inland ice when the sign came out flipped."""
+    profile, junction = _turning_profile()
+    gp_km = junction + 30.0
+    sec = _build_section(profile, gp_km, SEA_LEVEL, None, floor=-1500.0,
+                         sign=profile.landward_sign(window=(junction,
+                                                           profile.x[-1])))
+
+    assert not sec.submerged[profile.x < junction].any()

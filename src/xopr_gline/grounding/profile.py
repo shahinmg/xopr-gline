@@ -284,16 +284,26 @@ class GlacierProfile:
         ).values
         return uniform_filter1d(filled, size=max(3, int(round(smooth_km / self.dx))))
 
-    def landward_sign(self, smooth_km: float = 5.0) -> int:
+    def landward_sign(self, smooth_km: float = 5.0,
+                      window: Optional[tuple] = None) -> int:
         """
         +1 if x increases landward, -1 if it increases seaward.
 
         Grounded ice sits further above flotation than floating ice, so the
         sign of the residual's trend along x gives the orientation. Petermann
         frames 7:11 run landward (+1); Helheim frames 14:16 run seaward (-1).
+
+        Orientation is local. A segment long enough to turn carries a residual
+        maximum in the middle, and one line fitted over the whole of it points
+        whichever way the longer arm runs: 20080730_01 frames 15-16 read +1
+        over 0-60.75 km while the terminus sits at 57.50 km. Pass `window` to
+        fit only the stretch being analysed. The residual is still smoothed on
+        the full profile, so the fit keeps its context either way.
         """
         residual = self.smoothed_residual(smooth_km)
         ok = np.isfinite(residual)
+        if window is not None:
+            ok = ok & (self.x >= window[0]) & (self.x <= window[1])
         if ok.sum() < 2:
             raise ValueError("flotation residual is undefined on this profile")
         slope = np.polyfit(self.x[ok], residual[ok], 1)[0]
@@ -481,7 +491,8 @@ class GlacierProfile:
 
     def calving_front_km(self, from_km: Optional[float] = None,
                          min_thickness_m: float = 25.0,
-                         min_open_km: float = 1.0) -> Optional[float]:
+                         min_open_km: float = 1.0,
+                         sign: Optional[int] = None) -> Optional[float]:
         """
         The glacier's calving front in km, or None if the line never reaches
         open water.
@@ -496,13 +507,15 @@ class GlacierProfile:
         with no usable residual has no front to report. That returns None
         rather than raising: callers reach here while screening a segment out,
         and an unusable profile should stay a verdict rather than become an
-        error.
+        error. Pass `sign` where the caller already knows the local
+        orientation, which on a segment that turns is not the whole-profile one.
         """
         crossings = self.terminus_crossings_km(min_thickness_m, min_open_km)
-        try:
-            sign = self.landward_sign()
-        except ValueError:
-            return None
+        if sign is None:
+            try:
+                sign = self.landward_sign()
+            except ValueError:
+                return None
         if from_km is not None:
             crossings = [t for t in crossings
                          if (t <= from_km if sign > 0 else t >= from_km)]

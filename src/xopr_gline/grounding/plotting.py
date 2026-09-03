@@ -122,6 +122,10 @@ def plot_detection(profile: GlacierProfile,
         lo, hi = primary.search_window
         x0, x1 = _data_extent(profile, lo, hi, pad_km)
         bands = _gz_bands(gz)
+        # Orientation from the searched stretch, not the whole segment: a
+        # segment that turns fits a sign pointing the wrong way, which flips
+        # the front, the grounded side and the held bottom all at once.
+        sign = profile.landward_sign(window=(lo, hi))
 
         ratios = {"radar": 1.9, "geom": 2.1, "resid": 1.3, "amp": 1.3,
                   "post": 1.7}
@@ -148,7 +152,10 @@ def plot_detection(profile: GlacierProfile,
         # other crossings are bergs in the fjord: drawn, because they explain
         # the bed power, but faint, because the grounding point is measured
         # against the front alone.
-        front = profile.calving_front_km()
+        # From the searched stretch's landward edge, matching _qc_fields:
+        # not the profile's end, which is the far side on a segment that
+        # turns, and not the pick, which can sit just seaward of the front.
+        front = profile.calving_front_km(lo if sign < 0 else hi, sign=sign)
         termini = [t for t in profile.terminus_crossings_km() if x0 <= t <= x1]
         bergs = [t for t in termini if front is None or t != front]
         for ax in axs:
@@ -178,7 +185,7 @@ def plot_detection(profile: GlacierProfile,
         # from floating in the section. The onset is where the bed echo starts
         # to change, i.e. the seaward edge of the transition, not the pick.
         sec = _build_section(profile, primary.map_km, sea_level, bathy, floor,
-                             project_bathymetry)
+                             project_bathymetry, sign=sign)
         ice = sec.ice
         handles = []
         if fill_layers:
@@ -501,7 +508,7 @@ class _Section:
 
 
 def _build_section(profile, gp_km, sea_level, bathymetry, floor,
-                   project_bathymetry=True, keel_clearance_m=15.0):
+                   project_bathymetry=True, keel_clearance_m=15.0, sign=None):
     """
     Interfaces and a per-sample state for the geometry panel.
 
@@ -509,21 +516,27 @@ def _build_section(profile, gp_km, sea_level, bathymetry, floor,
     set by the detected grounding point: ocean seaward of it, bed landward. The
     seabed is then clamped under the ice above it, which is what stops a
     disagreeing BedMachine bed drawing a line through the middle of the ice.
+
+    `sign` is the local orientation. Taken over a whole segment it can point
+    the wrong way, which flips every side-of-the-pick judgement below.
     """
+    if sign is None:
+        sign = profile.landward_sign()
     surf, surf_bridged = _interp_gaps(profile.x, profile.h_surf, _MAX_BRIDGE_KM)
     bed, base_bridged = _interp_gaps(profile.x, profile.h_bed, _MAX_BRIDGE_KM)
-    grounded = ((profile.x >= gp_km) if profile.landward_sign() > 0
+    grounded = ((profile.x >= gp_km) if sign > 0
                 else (profile.x <= gp_km))
 
     # The ice runs to the terminus, but its bottom pick collapses before then,
     # so the bottom is carried out at the depth it last held.
     collapsed = _collapsed_bottom(profile, surf, bed, grounded)
     if collapsed.any():
-        bed, held = _hold_front_bottom(profile, bed, collapsed, sea_level)
+        bed, held = _hold_front_bottom(profile, bed, collapsed, sea_level,
+                                       sign=sign)
         base_bridged = (base_bridged | held) & np.isfinite(bed)
 
     ice = _ice_mask(surf, bed)
-    ahead = _ahead_of_terminus(profile, ice, gp_km)
+    ahead = _ahead_of_terminus(profile, ice, gp_km, sign=sign)
     ice = ice & ~ahead
 
     # A stretch with no pick is unknown, not open water. Keeping that its own
@@ -777,7 +790,8 @@ def _collapsed_bottom(profile, surf, bed, grounded, tolerance=0.5):
             & (bed - profile.geoid_separation_m > tolerance * draft))
 
 
-def _hold_front_bottom(profile, bed, collapsed, sea_level, min_draft_m=20.0):
+def _hold_front_bottom(profile, bed, collapsed, sea_level, min_draft_m=20.0,
+                       sign=None):
     """
     Ice bottom carried out to the terminus at the depth it last held.
 
@@ -794,7 +808,9 @@ def _hold_front_bottom(profile, bed, collapsed, sea_level, min_draft_m=20.0):
 
     Returns the bottom and a mask of the samples it made up.
     """
-    seaward = slice(None) if profile.landward_sign() < 0 else slice(None, None, -1)
+    if sign is None:
+        sign = profile.landward_sign()
+    seaward = slice(None) if sign < 0 else slice(None, None, -1)
     b = bed[seaward].copy()
     anchor = int(np.argmax(collapsed[seaward]))
     while anchor > 0 and np.isfinite(b[anchor - 1]) and b[anchor - 1] < b[anchor]:
@@ -809,7 +825,7 @@ def _hold_front_bottom(profile, bed, collapsed, sea_level, min_draft_m=20.0):
     return b[seaward], held[seaward]
 
 
-def _ahead_of_terminus(profile, ice, gp_km):
+def _ahead_of_terminus(profile, ice, gp_km, sign=None):
     """
     Samples in front of the glacier, seaward of its calving face.
 
@@ -820,8 +836,9 @@ def _ahead_of_terminus(profile, ice, gp_km):
     seaward end of the ice the grounding point sits in, for a transect that
     never reaches open water.
     """
-    sign = profile.landward_sign()
-    front = profile.calving_front_km(gp_km)
+    if sign is None:
+        sign = profile.landward_sign()
+    front = profile.calving_front_km(gp_km, sign=sign)
     if front is None:
         if not ice.any():
             return np.zeros(len(profile.x), dtype=bool)
